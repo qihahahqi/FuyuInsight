@@ -1,0 +1,62 @@
+server:
+  host: "0.0.0.0"
+  port: 5001
+  debug: true
+
+database:
+  host: "localhost"
+  port: 3306
+  database: "myapp"
+  user: "devuser"
+  password: "dev123456"
+  charset: "utf8mb4"
+
+strategy:
+  stop_profit_target: 0.20
+  max_loss: 0.30
+  stop_profit_levels:
+    - [0.15, 0.30]
+    - [0.18, 0.30]
+    - [0.20, 0.40]
+  add_position_levels:
+    - [-0.05, 0.05]
+    - [-0.10, 0.10]
+    - [-0.15, 0.15]
+    - [-0.20, 0.20]
+    - [-0.25, 0.25]
+  max_add_ratio: 1.0
+  position_limits:
+    etf_index: 0.60
+    etf_sector: 0.15
+    fund: 0.10
+    stock: 0.05
+
+llm:
+  enabled: true
+  provider: "bailian-anthropic"
+  api_key: "sk-4e7843c7e77744b59668854f36efca1c"
+  api_base: "https://dashscope.aliyuncs.com/apps/anthropic"
+  model: "glm-5"
+  temperature: 0.7
+  max_tokens: 2000
+
+jwt:
+  secret_key: "jwt-secret-key-please-change-in-production"
+  expires_hours: 24
+
+# 金融数据接口配置
+tushare:
+  enabled: true
+  token: "e57e1b5439d7ee8dd9e88f66b325869acdbbdcf7aaff46af363f0044"  # 用户在系统设置中配置
+  base_url: "https://api.tushare.pro"
+  cache_enabled: true
+  cache_expire_hours: 24  # 数据缓存过期时间
+
+akshare:
+  enabled: false
+
+# 显示配置
+display:
+  # 盈利颜色：red=红色，green=绿色（中国股市习惯：红涨绿跌）
+  profit_color: "red"
+  loss_color: "green"

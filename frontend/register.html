@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>注册 - 投资理财管理系统</title>
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-container {
+            width: 100%;
+            max-width: 400px;
+            padding: 20px;
+        }
+        .login-card {
+            background: var(--bg-primary);
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow-lg);
+            padding: 40px;
+        }
+        .login-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .login-header h1 {
+            font-size: 24px;
+            color: var(--primary-color);
+            margin-bottom: 8px;
+        }
+        .login-header p {
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+        .form-input {
+            width: 100%;
+            padding: 12px 16px;
+            font-size: 14px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius-sm);
+            transition: var(--transition);
+        }
+        .form-input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(74, 144, 226, 0.1);
+        }
+        .btn-login {
+            width: 100%;
+            padding: 14px;
+            font-size: 16px;
+            margin-top: 10px;
+        }
+        .login-footer {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border-color);
+        }
+        .login-footer a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+        .login-footer a:hover {
+            text-decoration: underline;
+        }
+        .error-message {
+            color: var(--danger-color);
+            font-size: 14px;
+            margin-bottom: 16px;
+            text-align: center;
+            display: none;
+        }
+        .error-message.show {
+            display: block;
+        }
+        .success-message {
+            color: var(--success-color);
+            font-size: 14px;
+            margin-bottom: 16px;
+            text-align: center;
+            display: none;
+        }
+        .success-message.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-card">
+            <div class="login-header">
+                <h1>投资理财管理系统</h1>
+                <p>创建新账户</p>
+            </div>
+
+            <div id="error-message" class="error-message"></div>
+            <div id="success-message" class="success-message"></div>
+
+            <form id="register-form">
+                <div class="form-group">
+                    <label for="username">用户名</label>
+                    <input type="text" id="username" name="username" class="form-input" placeholder="请输入用户名 (3-50字符)" required minlength="3" maxlength="50">
+                </div>
+                <div class="form-group">
+                    <label for="email">邮箱</label>
+                    <input type="email" id="email" name="email" class="form-input" placeholder="请输入邮箱" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">密码</label>
+                    <input type="password" id="password" name="password" class="form-input" placeholder="请输入密码 (至少6位)" required minlength="6">
+                </div>
+                <div class="form-group">
+                    <label for="confirm-password">确认密码</label>
+                    <input type="password" id="confirm-password" name="confirm-password" class="form-input" placeholder="请再次输入密码" required>
+                </div>
+                <button type="submit" class="btn btn-primary btn-login">注册</button>
+            </form>
+
+            <div class="login-footer">
+                <p>已有账户？ <a href="login.html">立即登录</a></p>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/auth.js"></script>
+    <script>
+        // 检查是否已登录
+        if (Auth.isLoggedIn()) {
+            window.location.href = 'index.html';
+        }
+
+        // 注册表单提交
+        document.getElementById('register-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const username = document.getElementById('username').value;
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const confirmPassword = document.getElementById('confirm-password').value;
+            const errorEl = document.getElementById('error-message');
+            const successEl = document.getElementById('success-message');
+
+            // 重置消息
+            errorEl.classList.remove('show');
+            successEl.classList.remove('show');
+
+            // 验证密码
+            if (password !== confirmPassword) {
+                errorEl.textContent = '两次输入的密码不一致';
+                errorEl.classList.add('show');
+                return;
+            }
+
+            try {
+                const result = await Auth.register(username, email, password);
+
+                if (result.success) {
+                    successEl.textContent = '注册成功，即将跳转到登录页面...';
+                    successEl.classList.add('show');
+
+                    // 2秒后跳转到登录页
+                    setTimeout(() => {
+                        window.location.href = 'login.html';
+                    }, 2000);
+                } else {
+                    errorEl.textContent = result.message || '注册失败';
+                    errorEl.classList.add('show');
+                }
+            } catch (error) {
+                errorEl.textContent = '网络错误，请稍后重试';
+                errorEl.classList.add('show');
+            }
+        });
+    </script>
+</body>
+</html>

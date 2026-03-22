@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理员登录 - 投资理财管理系统</title>
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        body {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-container {
+            width: 100%;
+            max-width: 400px;
+            padding: 20px;
+        }
+        .login-card {
+            background: #16213e;
+            border-radius: var(--border-radius);
+            box-shadow: 0 10px 40px rgba(233, 69, 96, 0.2);
+            padding: 40px;
+            border: 1px solid #0f3460;
+        }
+        .login-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .login-header h1 {
+            font-size: 24px;
+            color: #e94560;
+            margin-bottom: 8px;
+        }
+        .login-header p {
+            color: #a0a0a0;
+            font-size: 14px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #a0a0a0;
+            font-size: 14px;
+        }
+        .form-input {
+            width: 100%;
+            padding: 12px 16px;
+            font-size: 14px;
+            border: 1px solid #0f3460;
+            border-radius: var(--border-radius-sm);
+            background: #1a1a2e;
+            color: #fff;
+            transition: var(--transition);
+        }
+        .form-input:focus {
+            outline: none;
+            border-color: #e94560;
+            box-shadow: 0 0 0 3px rgba(233, 69, 96, 0.1);
+        }
+        .btn-login {
+            width: 100%;
+            padding: 14px;
+            font-size: 16px;
+            margin-top: 10px;
+            background: #e94560;
+            border: none;
+        }
+        .btn-login:hover {
+            background: #c73e54;
+        }
+        .login-footer {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #0f3460;
+        }
+        .login-footer a {
+            color: #a0a0a0;
+            text-decoration: none;
+            font-size: 14px;
+        }
+        .login-footer a:hover {
+            color: #e94560;
+        }
+        .error-message {
+            color: #e94560;
+            font-size: 14px;
+            margin-bottom: 16px;
+            text-align: center;
+            display: none;
+        }
+        .error-message.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-card">
+            <div class="login-header">
+                <h1>管理后台</h1>
+                <p>请使用管理员账户登录</p>
+            </div>
+
+            <div id="error-message" class="error-message"></div>
+
+            <form id="admin-login-form">
+                <div class="form-group">
+                    <label for="username">用户名</label>
+                    <input type="text" id="username" name="username" class="form-input" placeholder="请输入管理员用户名" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">密码</label>
+                    <input type="password" id="password" name="password" class="form-input" placeholder="请输入密码" required>
+                </div>
+                <button type="submit" class="btn btn-primary btn-login">登录管理后台</button>
+            </form>
+
+            <div class="login-footer">
+                <a href="login.html">← 返回用户登录</a>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/auth.js"></script>
+    <script>
+        // 如果已登录且是管理员，直接跳转到管理后台
+        if (Auth.isLoggedIn()) {
+            const user = Auth.getUser();
+            if (user && user.is_admin) {
+                window.location.href = 'admin.html';
+            }
+        }
+
+        // 登录表单提交
+        document.getElementById('admin-login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const errorEl = document.getElementById('error-message');
+
+            errorEl.classList.remove('show');
+
+            try {
+                const result = await Auth.login(username, password);
+
+                if (result.success) {
+                    // 检查是否是管理员
+                    if (result.user && result.user.is_admin) {
+                        window.location.href = 'admin.html';
+                    } else {
+                        // 不是管理员，清除登录状态
+                        Auth.logout();
+                        errorEl.textContent = '您没有管理员权限';
+                        errorEl.classList.add('show');
+                    }
+                } else {
+                    errorEl.textContent = result.message || '登录失败';
+                    errorEl.classList.add('show');
+                }
+            } catch (error) {
+                errorEl.textContent = '网络错误，请稍后重试';
+                errorEl.classList.add('show');
+            }
+        });
+    </script>
+</body>
+</html>
