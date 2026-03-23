@@ -74,7 +74,8 @@ class BaseStrategy(ABC):
     display_name: str = "基础策略"
 
     def __init__(self, params: Dict = None):
-        self.params = params or {}
+        # 合并默认参数和用户参数
+        self.params = {**self.get_default_params(), **(params or {})}
         self.name = self.display_name  # 使用中文显示名
 
     @abstractmethod
