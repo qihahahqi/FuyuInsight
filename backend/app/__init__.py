@@ -72,9 +72,16 @@ def create_app(config=None):
     db.init_app(app)
     migrate.init_app(app, db, directory='migrations/alembic')
     limiter.init_app(app)
+    # CORS 配置 - 从配置文件读取允许的域名
+    cors_config = config.get('cors', {})
+    allowed_origins = cors_config.get('allowed_origins', [
+        'http://localhost:5001',
+        'http://127.0.0.1:5001',
+        'https://fuyuhuice.online'
+    ])
     CORS(app, resources={
         r"/api/*": {
-            "origins": "*",
+            "origins": allowed_origins,
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
             "allow_headers": ["Content-Type", "Authorization"],
             "supports_credentials": True

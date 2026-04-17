@@ -3,6 +3,7 @@
 """
 日志配置模块
 支持多种日志模式：debug（全量）、prod（关键）、file（文件保存）
+支持敏感数据脱敏
 """
 
 import os
@@ -10,6 +11,7 @@ import sys
 import time
 import uuid
 import logging
+import re
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
 from flask import request, g, has_request_context
@@ -24,6 +26,55 @@ KEY_MODULES = [
 
 # 完全静默的模块（不显示任何日志）
 SILENT_MODULES = ['werkzeug', 'urllib3', 'socketio', 'engineio', 'sqlalchemy', 'alembic']
+
+# 敏感字段列表（用于脱敏）
+SENSITIVE_FIELDS = [
+    'password', 'api_key', 'apikey', 'token', 'secret', 'credential',
+    'jwt', 'auth', 'key', 'private', 'session', 'cookie', 'authorization'
+]
+
+
+def sanitize_for_log(data):
+    """
+    脱敏敏感字段
+
+    Args:
+        data: 字典、字符串或其他数据
+
+    Returns:
+        脱敏后的数据
+    """
+    if isinstance(data, dict):
+        result = {}
+        for key, value in data.items():
+            key_lower = key.lower()
+            if any(s in key_lower for s in SENSITIVE_FIELDS):
+                result[key] = '***REDACTED***'
+            elif isinstance(value, (dict, str)):
+                result[key] = sanitize_for_log(value)
+            else:
+                result[key] = value
+        return result
+    elif isinstance(data, str):
+        # 脱敏字符串中的敏感信息
+        sanitized = data
+        # 脱敏 JWT Token 格式
+        if re.search(r'eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*', data):
+            sanitized = re.sub(
+                r'eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*',
+                '***JWT_TOKEN***',
+                sanitized
+            )
+        # 脱敏 API Key 格式（常见的长度）
+        if re.search(r'[a-zA-Z0-9]{32,}', data):
+            sanitized = re.sub(
+                r'(api[_-]?key["\']?\s*[:=]\s*["\']?)[a-zA-Z0-9]{32,}',
+                r'\1***API_KEY***',
+                sanitized,
+                flags=re.IGNORECASE
+            )
+        return sanitized
+    return data
 
 
 def setup_log_level(mode='prod', log_dir=None):
@@ -129,9 +180,18 @@ def setup_log_level(mode='prod', log_dir=None):
 
 
 class KeyLogFilter(logging.Filter):
-    """关键日志过滤器 - 只显示关键模块的 INFO 日志"""
+    """关键日志过滤器 - 只显示关键模块的 INFO 日志，并脱敏敏感信息"""
 
     def filter(self, record):
+        # 应用日志脱敏
+        if hasattr(record, 'msg') and isinstance(record.msg, str):
+            record.msg = sanitize_for_log(record.msg)
+        if hasattr(record, 'args') and record.args:
+            if isinstance(record.args, dict):
+                record.args = sanitize_for_log(record.args)
+            elif isinstance(record.args, tuple):
+                record.args = tuple(sanitize_for_log(arg) if isinstance(arg, (dict, str)) else arg for arg in record.args)
+
         # ERROR 及以上级别始终显示
         if record.levelno >= logging.ERROR:
             return True

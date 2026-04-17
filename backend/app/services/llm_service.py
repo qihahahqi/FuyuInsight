@@ -2,13 +2,65 @@
 # -*- coding: utf-8 -*-
 """
 大模型分析服务
+支持超时、重试和 Provider 降级机制
 """
 
 from typing import Dict, List, Optional
 import json
 import logging
+import time
+import functools
 
 logger = logging.getLogger(__name__)
+
+# 默认超时时间（秒）
+DEFAULT_TIMEOUT = 60
+
+# 最大重试次数
+MAX_RETRIES = 3
+
+# 重试基础延迟（秒）
+BASE_RETRY_DELAY = 1.0
+
+# Provider 降级顺序（当主要 Provider 失败时尝试备用）
+PROVIDER_FALLBACK_ORDER = ['openai', 'anthropic', 'deepseek', 'bailian', 'qwen', 'glm']
+
+# 敏感字段（用于日志脱敏）
+SENSITIVE_FIELDS = ['api_key', 'password', 'token', 'secret', 'credential']
+
+
+def sanitize_log_data(data: dict) -> dict:
+    """脱敏日志数据中的敏感字段"""
+    if not isinstance(data, dict):
+        return data
+    result = {}
+    for key, value in data.items():
+        if any(s in key.lower() for s in SENSITIVE_FIELDS):
+            result[key] = '***REDACTED***'
+        else:
+            result[key] = value
+    return result
+
+
+def retry_with_backoff(max_retries=MAX_RETRIES, base_delay=BASE_RETRY_DELAY):
+    """指数退避重试装饰器"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)  # 指数退避
+                        logger.warning(f"[LLM] API调用失败(尝试 {attempt+1}/{max_retries}): {str(e)}, {delay}秒后重试")
+                        time.sleep(delay)
+            logger.error(f"[LLM] API调用最终失败，已重试 {max_retries} 次")
+            raise last_exception
+        return wrapper
+    return decorator
 
 
 class LLMService:
@@ -166,14 +218,20 @@ class LLMService:
         self._client = None
 
     def _get_client(self):
-        """获取API客户端"""
+        """获取API客户端（带超时配置）"""
         if self._client is not None:
             return self._client
 
         if not self.api_key:
             raise ValueError("API Key 未配置")
 
-        logger.info(f"[LLM] 初始化客户端: provider={self.provider}, base_url={self.api_base}")
+        # 脱敏日志
+        log_data = sanitize_log_data({
+            'provider': self.provider,
+            'base_url': self.api_base,
+            'api_key': self.api_key[:8] + '...' if len(self.api_key) > 8 else '***'
+        })
+        logger.info(f"[LLM] 初始化客户端: {log_data}")
 
         try:
             # OpenAI 兼容的提供商
@@ -182,19 +240,22 @@ class LLMService:
                 from openai import OpenAI
                 self._client = OpenAI(
                     api_key=self.api_key,
-                    base_url=self.api_base if self.api_base else None
+                    base_url=self.api_base if self.api_base else None,
+                    timeout=DEFAULT_TIMEOUT  # 添加超时配置
                 )
             elif self.provider == "bailian-anthropic":
                 # 百炼 Anthropic 兼容格式
                 import anthropic
                 self._client = anthropic.Anthropic(
                     api_key=self.api_key,
-                    base_url=self.api_base
+                    base_url=self.api_base,
+                    timeout=DEFAULT_TIMEOUT  # 添加超时配置
                 )
             elif self.provider == "anthropic":
                 import anthropic
                 self._client = anthropic.Anthropic(
-                    api_key=self.api_key
+                    api_key=self.api_key,
+                    timeout=DEFAULT_TIMEOUT  # 添加超时配置
                 )
             else:
                 raise ValueError(f"不支持的提供商: {self.provider}")

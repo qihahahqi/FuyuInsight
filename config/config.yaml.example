@@ -6,6 +6,14 @@ server:
   port: 5001
   debug: false  # 生产环境请设置为 false
 
+# CORS 跨域配置
+cors:
+  allowed_origins:
+    - "http://localhost:5001"
+    - "http://127.0.0.1:5001"
+    - "https://fuyuhuice.online"
+    # 生产环境添加实际域名
+
 database:
   host: "localhost"
   port: 3306
