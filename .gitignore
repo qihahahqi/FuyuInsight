@@ -86,3 +86,21 @@ config/config.yaml
 
 # Memory files
 memory/
+
+# Database backups
+*.sql
+*.dump
+*.bak
+backup/
+!init_database.sql
+
+# Keys and certificates
+*.key
+*.pem
+*.crt
+*.p12
+
+# Security sensitive files
+secrets/
+credentials/
+*.secret

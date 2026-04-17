@@ -14,8 +14,9 @@ CREATE DATABASE IF NOT EXISTS myapp
     COLLATE utf8mb4_unicode_ci;
 
 -- 创建用户（如果不存在）
--- 注意：请修改密码为安全的密码
-CREATE USER IF NOT EXISTS 'devuser'@'localhost' IDENTIFIED BY 'dev123456';
+-- ⚠️ 重要：请将 YOUR_PASSWORD_HERE 替换为您的实际密码
+-- 建议使用强密码（至少12位，包含大小写字母、数字、特殊字符）
+CREATE USER IF NOT EXISTS 'devuser'@'localhost' IDENTIFIED BY 'YOUR_PASSWORD_HERE';
 
 -- 授权
 GRANT ALL PRIVILEGES ON myapp.* TO 'devuser'@'localhost';
@@ -30,7 +31,7 @@ SELECT '数据库名: myapp' AS info
 UNION ALL
 SELECT '用户名: devuser'
 UNION ALL
-SELECT '密码: dev123456 (请在生产环境修改)'
+SELECT '密码: 请在上方 SQL 中设置您的密码'
 UNION ALL
 SELECT '请运行 python init_db.py 完成表结构初始化';
 
