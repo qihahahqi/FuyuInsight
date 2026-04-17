@@ -127,6 +127,34 @@ class SchedulerService:
             self._thread.join(timeout=5)
         logger.info("定时任务调度器已停止")
 
+    def is_running(self) -> bool:
+        """检查调度器是否正在运行"""
+        return self._running
+
+    def get_status(self) -> dict:
+        """获取调度器详细状态"""
+        return {
+            'running': self._running,
+            'sync_hours': self.sync_hours,
+            'jobs_count': len(self._jobs),
+            'last_sync': getattr(self, '_last_sync_time', None),
+            'is_trading_day': self.is_trading_day(),
+            'is_trading_time': self.is_trading_time()
+        }
+
+    def trigger_sync(self) -> dict:
+        """手动触发一次同步"""
+        if not self._app:
+            return {'success': False, 'message': 'Flask 应用未初始化'}
+
+        try:
+            self._run_jobs()
+            self._last_sync_time = datetime.now().isoformat()
+            return {'success': True, 'message': '同步任务已执行'}
+        except Exception as e:
+            logger.error(f"手动同步失败: {str(e)}")
+            return {'success': False, 'message': str(e)}
+
     def sync_all_users_positions(self):
         """同步所有用户的持仓数据"""
         from .. import db

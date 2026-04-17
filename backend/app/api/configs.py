@@ -508,3 +508,183 @@ def get_data_sources_config():
         return success_response(data_sources)
     except Exception as e:
         return error_response(str(e))
+
+
+# ==================== 策略模板 API ====================
+
+# 预定义的策略模板
+STRATEGY_TEMPLATES = {
+    'conservative': {
+        'id': 'conservative',
+        'name': '保守型',
+        'description': '适合风险厌恶型投资者，注重本金安全',
+        'params': {
+            'stop_profit_target': 0.10,
+            'max_loss': 0.15,
+            'stop_profit_levels': [
+                [0.08, 0.50],
+                [0.10, 0.50]
+            ],
+            'add_position_levels': [
+                [-0.05, 0.05],
+                [-0.10, 0.05]
+            ],
+            'max_add_ratio': 0.5,
+            'position_limits': {
+                'etf_index': 0.70,
+                'etf_sector': 0.10,
+                'fund': 0.15,
+                'stock': 0.05
+            }
+        }
+    },
+    'balanced': {
+        'id': 'balanced',
+        'name': '平衡型',
+        'description': '适合大多数投资者，兼顾收益与风险',
+        'params': {
+            'stop_profit_target': 0.20,
+            'max_loss': 0.25,
+            'stop_profit_levels': [
+                [0.15, 0.30],
+                [0.18, 0.30],
+                [0.20, 0.40]
+            ],
+            'add_position_levels': [
+                [-0.05, 0.05],
+                [-0.10, 0.10],
+                [-0.15, 0.15],
+                [-0.20, 0.20]
+            ],
+            'max_add_ratio': 0.75,
+            'position_limits': {
+                'etf_index': 0.60,
+                'etf_sector': 0.15,
+                'fund': 0.10,
+                'stock': 0.05
+            }
+        }
+    },
+    'aggressive': {
+        'id': 'aggressive',
+        'name': '激进型',
+        'description': '适合风险偏好型投资者，追求高收益',
+        'params': {
+            'stop_profit_target': 0.30,
+            'max_loss': 0.35,
+            'stop_profit_levels': [
+                [0.20, 0.20],
+                [0.25, 0.30],
+                [0.30, 0.50]
+            ],
+            'add_position_levels': [
+                [-0.05, 0.10],
+                [-0.10, 0.15],
+                [-0.15, 0.20],
+                [-0.20, 0.25],
+                [-0.25, 0.30]
+            ],
+            'max_add_ratio': 1.0,
+            'position_limits': {
+                'etf_index': 0.50,
+                'etf_sector': 0.20,
+                'fund': 0.10,
+                'stock': 0.10
+            }
+        }
+    },
+    'pyramid': {
+        'id': 'pyramid',
+        'name': '金字塔加仓',
+        'description': '经典金字塔加仓策略，越跌越买',
+        'params': {
+            'stop_profit_target': 0.25,
+            'max_loss': 0.30,
+            'stop_profit_levels': [
+                [0.15, 0.30],
+                [0.20, 0.30],
+                [0.25, 0.40]
+            ],
+            'add_position_levels': [
+                [-0.05, 0.05],
+                [-0.10, 0.10],
+                [-0.15, 0.15],
+                [-0.20, 0.20],
+                [-0.25, 0.25]
+            ],
+            'max_add_ratio': 1.0,
+            'position_limits': {
+                'etf_index': 0.60,
+                'etf_sector': 0.15,
+                'fund': 0.10,
+                'stock': 0.05
+            }
+        }
+    }
+}
+
+
+@configs_bp.route('/configs/strategy/templates', methods=['GET'])
+@login_required
+def get_strategy_templates():
+    """获取策略参数模板列表"""
+    try:
+        templates = list(STRATEGY_TEMPLATES.values())
+        return success_response({'templates': templates})
+    except Exception as e:
+        return error_response(str(e))
+
+
+@configs_bp.route('/configs/strategy/templates/<template_id>', methods=['GET'])
+@login_required
+def get_strategy_template(template_id):
+    """获取单个策略模板详情"""
+    try:
+        template = STRATEGY_TEMPLATES.get(template_id)
+        if not template:
+            return error_response("模板不存在", 404)
+        return success_response(template)
+    except Exception as e:
+        return error_response(str(e))
+
+
+@configs_bp.route('/configs/strategy/apply-template/<template_id>', methods=['POST'])
+@login_required
+def apply_strategy_template(template_id):
+    """应用策略模板到用户配置"""
+    try:
+        user = get_current_user()
+        template = STRATEGY_TEMPLATES.get(template_id)
+
+        if not template:
+            return error_response("模板不存在", 404)
+
+        params = template['params']
+
+        # 更新数据库配置
+        for key, value in params.items():
+            db_key = f'strategy.{key}'
+            if isinstance(value, (dict, list)):
+                value_str = json.dumps(value, ensure_ascii=False)
+            else:
+                value_str = str(value)
+
+            config = Config.query.filter_by(key=db_key, user_id=user.id).first()
+            if config:
+                config.value = value_str
+            else:
+                config = Config(user_id=user.id, key=db_key, value=value_str)
+                db.session.add(config)
+
+        db.session.commit()
+
+        # 更新内存配置
+        config_manager.set('strategy', params)
+
+        return success_response({
+            'template': template,
+            'applied_params': params
+        }, f"已应用 {template['name']} 模板")
+    except Exception as e:
+        db.session.rollback()
+        return error_response(str(e))

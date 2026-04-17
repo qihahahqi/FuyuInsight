@@ -1012,3 +1012,220 @@ def delete_backtest_history(history_id):
         return success_response({'message': '删除成功'})
     except Exception as e:
         return error_response(str(e))
+
+
+# ==================== 回测导出 API ====================
+
+@backtest_bp.route('/backtest/export/<int:history_id>/excel', methods=['GET'])
+@login_required
+def export_backtest_excel(history_id):
+    """导出回测结果为 Excel"""
+    try:
+        user_id = request.current_user_id
+
+        history = BacktestHistory.query.filter_by(id=history_id, user_id=user_id).first()
+
+        if not history:
+            return error_response('历史记录不存在')
+
+        results = json.loads(history.results) if history.results else {}
+
+        if not results:
+            return error_response('回测数据为空')
+
+        output = BytesIO()
+
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # 1. 策略摘要表
+            strategies = results.get('strategies', [])
+            summary_data = [{
+                '策略': s.get('strategy_name', ''),
+                '总收益率(%)': s.get('total_return', 0),
+                '年化收益率(%)': s.get('annual_return', 0),
+                '最大回撤(%)': s.get('max_drawdown', 0),
+                '夏普比率': s.get('sharpe_ratio', 0),
+                '胜率(%)': s.get('win_rate', 0),
+                '交易次数': s.get('trade_count', 0),
+                '最终市值': s.get('final_value', 0)
+            } for s in strategies]
+
+            if summary_data:
+                df_summary = pd.DataFrame(summary_data)
+                df_summary.to_excel(writer, index=False, sheet_name='策略摘要')
+
+            # 2. 各策略交易记录
+            for i, strategy in enumerate(strategies):
+                records = strategy.get('records', [])
+                if records:
+                    df_records = pd.DataFrame(records)
+                    sheet_name = f'{strategy.get("strategy_name", f"策略{i}")}'
+                    # Excel sheet名称最长31字符
+                    sheet_name = sheet_name[:31]
+                    df_records.to_excel(writer, index=False, sheet_name=sheet_name)
+
+            # 3. 基础信息
+            info_data = {
+                '标的代码': results.get('symbol', ''),
+                '资产类型': results.get('asset_type', ''),
+                '初始资金': results.get('initial_capital', 100000),
+                '开始日期': results.get('start_date', ''),
+                '结束日期': results.get('end_date', ''),
+                '数据条数': results.get('data_count', 0),
+                '导出时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            df_info = pd.DataFrame(list(info_data.items()), columns=['项目', '值'])
+            df_info.to_excel(writer, index=False, sheet_name='基本信息')
+
+        output.seek(0)
+
+        filename = f'回测报告_{results.get("symbol", "unknown")}_{datetime.now().strftime("%Y%m%d")}.xlsx'
+
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        logger.error(f"导出Excel失败: {str(e)}")
+        return error_response(str(e))
+
+
+@backtest_bp.route('/backtest/export/<int:history_id>/pdf', methods=['GET'])
+@login_required
+def export_backtest_pdf(history_id):
+    """导出回测结果为 PDF"""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, letter
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch, cm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+
+        user_id = request.current_user_id
+
+        history = BacktestHistory.query.filter_by(id=history_id, user_id=user_id).first()
+
+        if not history:
+            return error_response('历史记录不存在')
+
+        results = json.loads(history.results) if history.results else {}
+
+        if not results:
+            return error_response('回测数据为空')
+
+        output = BytesIO()
+
+        doc = SimpleDocTemplate(output, pagesize=A4,
+                                rightMargin=1*cm, leftMargin=1*cm,
+                                topMargin=1*cm, bottomMargin=1*cm)
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=18,
+            alignment=TA_CENTER,
+            spaceAfter=20
+        )
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontSize=14,
+            spaceAfter=10
+        )
+
+        elements = []
+
+        # 标题
+        elements.append(Paragraph(f'策略回测报告', title_style))
+        elements.append(Spacer(1, 0.5*cm))
+
+        # 基本信息
+        info_text = f"""
+        标的代码: {results.get('symbol', '')}<br/>
+        资产类型: {results.get('asset_type', '')}<br/>
+        初始资金: {results.get('initial_capital', 100000):,.0f} 元<br/>
+        回测区间: {results.get('start_date', '')} ~ {results.get('end_date', '')}<br/>
+        数据条数: {results.get('data_count', 0)}<br/>
+        导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        """
+        elements.append(Paragraph('基本信息', heading_style))
+        elements.append(Paragraph(info_text, styles['Normal']))
+        elements.append(Spacer(1, 0.5*cm))
+
+        # 策略摘要表
+        strategies = results.get('strategies', [])
+        if strategies:
+            elements.append(Paragraph('策略对比', heading_style))
+
+            table_data = [['策略', '总收益率', '年化收益率', '最大回撤', '夏普比率', '胜率', '交易次数']]
+            for s in strategies:
+                table_data.append([
+                    s.get('strategy_name', ''),
+                    f'{s.get("total_return", 0):.2f}%',
+                    f'{s.get("annual_return", 0):.2f}%',
+                    f'{s.get("max_drawdown", 0):.2f}%',
+                    f'{s.get("sharpe_ratio", 0):.3f}',
+                    f'{s.get("win_rate", 0):.1f}%',
+                    str(s.get('trade_count', 0))
+                ])
+
+            table = Table(table_data, colWidths=[2.5*cm, 2*cm, 2*cm, 2*cm, 2*cm, 2*cm, 2*cm])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(table)
+
+        # 最佳策略详情
+        if strategies:
+            best = strategies[0]
+            elements.append(Spacer(1, 0.5*cm))
+            elements.append(Paragraph(f'最佳策略: {best.get("strategy_name", "")}', heading_style))
+
+            best_info = f"""
+            总收益率: {best.get("total_return", 0):.2f}%<br/>
+            年化收益率: {best.get("annual_return", 0):.2f}%<br/>
+            最大回撤: {best.get("max_drawdown", 0):.2f}%<br/>
+            夏普比率: {best.get("sharpe_ratio", 0):.3f}<br/>
+            胜率: {best.get("win_rate", 0):.1f}%<br/>
+            交易次数: {best.get("trade_count", 0)}<br/>
+            最终市值: {best.get("final_value", 0):,.2f} 元
+            """
+            elements.append(Paragraph(best_info, styles['Normal']))
+
+        # 免责声明
+        elements.append(Spacer(1, 1*cm))
+        disclaimer = """
+        <b>免责声明</b><br/>
+        本报告仅供参考，不构成任何投资建议。投资有风险，入市需谨慎。
+        历史收益不代表未来表现，请根据自身风险承受能力做出决策。
+        """
+        elements.append(Paragraph(disclaimer, styles['Normal']))
+
+        doc.build(elements)
+        output.seek(0)
+
+        filename = f'回测报告_{results.get("symbol", "unknown")}_{datetime.now().strftime("%Y%m%d")}.pdf'
+
+        return send_file(
+            output,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=filename
+        )
+    except ImportError:
+        return error_response('PDF导出需要安装 reportlab: pip install reportlab')
+    except Exception as e:
+        logger.error(f"导出PDF失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return error_response(str(e))

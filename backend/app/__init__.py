@@ -102,6 +102,8 @@ def create_app(config=None):
     from .api.charts import charts_bp
     from .api.admin import admin_bp
     from .api.datasource import datasource_bp
+    from .api.health import health_bp
+    from .api.scheduler import scheduler_bp
 
     app.register_blueprint(auth_bp, url_prefix='/api/v1')
     app.register_blueprint(positions_bp, url_prefix='/api/v1')
@@ -116,6 +118,8 @@ def create_app(config=None):
     app.register_blueprint(charts_bp, url_prefix='/api/v1')
     app.register_blueprint(admin_bp, url_prefix='/api/v1')
     app.register_blueprint(datasource_bp, url_prefix='/api/v1')
+    app.register_blueprint(health_bp, url_prefix='/api/v1')  # 健康检查接口
+    app.register_blueprint(scheduler_bp, url_prefix='/api/v1')  # 定时任务管理
 
     # 主页路由
     @app.route('/')
