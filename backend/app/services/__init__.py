@@ -19,6 +19,7 @@ from .baostock_service import BaoStockService, get_baostock_service
 from .akshare_service import AKShareService, get_akshare_service
 from .eastmoney_fund_service import EastMoneyFundService, get_eastmoney_fund_service
 from .market_data_service import MarketDataService, get_market_data_service
+from .ai_task_service import AIAnalysisTaskService, ai_task_service
 
 __all__ = [
     'ProfitService',
@@ -46,5 +47,7 @@ __all__ = [
     'EastMoneyFundService',
     'get_eastmoney_fund_service',
     'MarketDataService',
-    'get_market_data_service'
+    'get_market_data_service',
+    'AIAnalysisTaskService',
+    'ai_task_service'
 ]

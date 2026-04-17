@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from backend.app import create_app, db
-from backend.app.models import Position, Trade, Valuation, CashPool, Config
+from backend.app.models import Position, Trade, Valuation, CashPool, Config, Account, User
 
 
 def init_database():
@@ -46,10 +46,36 @@ def init_database():
         db.session.commit()
         print("✓ 默认配置初始化成功")
 
+        # 创建默认用户
+        print("\n正在创建默认用户...")
+
+        # 创建默认管理员用户
+        default_user = User(username='admin', email='admin@example.com')
+        default_user.set_password('admin123')  # 请在生产环境中修改
+        db.session.add(default_user)
+        db.session.commit()
+        print(f"✓ 默认用户创建成功 (用户名: admin, 密码: admin123)")
+        print("  ⚠️  请在生产环境中立即修改默认密码！")
+
+        # 创建默认账户
+        print("\n正在创建默认投资账户...")
+        default_account = Account(
+            user_id=default_user.id,
+            name='主账户',
+            account_type='personal',
+            broker='默认',
+            description='系统自动创建的默认账户',
+            is_active=True
+        )
+        db.session.add(default_account)
+        db.session.commit()
+        print(f"✓ 默认账户创建成功 (ID: {default_account.id})")
+
         # 初始化现金池
         print("\n正在初始化现金池...")
         from datetime import date
         initial_cash = CashPool(
+            user_id=default_user.id,
             amount=5000,
             balance=5000,
             event='初始储备',
@@ -64,16 +90,21 @@ def init_database():
         try:
             choice = input().strip().lower()
             if choice == 'y':
-                add_sample_data()
+                add_sample_data(default_user.id, default_account.id)
         except EOFError:
             pass
 
     print("\n" + "=" * 60)
     print("数据库初始化完成！")
     print("=" * 60)
+    print("\n默认登录信息:")
+    print("  用户名: admin")
+    print("  密码: admin123")
+    print("  ⚠️  请登录后立即修改密码！")
+    print("=" * 60)
 
 
-def add_sample_data():
+def add_sample_data(user_id, account_id):
     """添加示例数据"""
     from datetime import date, datetime
 
@@ -82,6 +113,8 @@ def add_sample_data():
     # 示例持仓
     positions = [
         Position(
+            user_id=user_id,
+            account_id=account_id,
             symbol='510300',
             name='沪深300ETF',
             asset_type='etf_index',
@@ -95,6 +128,8 @@ def add_sample_data():
             notes='核心仓位'
         ),
         Position(
+            user_id=user_id,
+            account_id=account_id,
             symbol='159915',
             name='创业板ETF',
             asset_type='etf_index',
@@ -116,6 +151,7 @@ def add_sample_data():
     # 示例估值数据
     valuations = [
         Valuation(
+            user_id=user_id,
             symbol='000300',
             index_name='沪深300',
             pe=12.5,
@@ -136,6 +172,8 @@ def add_sample_data():
     # 示例交易记录
     trades = [
         Trade(
+            user_id=user_id,
+            account_id=account_id,
             symbol='510300',
             trade_type='buy',
             quantity=5000,

@@ -18,31 +18,69 @@ profit_service = ProfitService()
 @analysis_bp.route('/analysis/profit', methods=['GET'])
 @login_required
 def get_profit_analysis():
-    """获取收益分析"""
+    """获取收益分析（只针对未清仓的持仓）"""
     try:
         user = get_current_user()
-        positions = Position.query.filter_by(user_id=user.id).all()
+        # 只查询未清仓的持仓（数量大于0）
+        positions = Position.query.filter_by(user_id=user.id).filter(Position.quantity > 0).all()
 
-        positions_data = [p.to_dict() for p in positions]
+        # 构建带交易记录的持仓数据
+        positions_data = []
+        for p in positions:
+            # 获取卖出交易记录，计算原始持仓数量
+            sells = Trade.query.filter_by(
+                user_id=user.id,
+                symbol=p.symbol,
+                trade_type='sell'
+            ).order_by(Trade.trade_date).all()
+
+            # 获取买入交易记录
+            buys = Trade.query.filter_by(
+                user_id=user.id,
+                symbol=p.symbol,
+                trade_type='buy'
+            ).order_by(Trade.trade_date).all()
+
+            # 计算原始持仓数量 = 当前数量 + 已卖出数量
+            total_sold = sum(t.quantity for t in sells)
+            original_quantity = p.quantity + total_sold
+
+            # 构建卖出记录列表
+            sell_records = [{'date': t.trade_date, 'quantity': t.quantity} for t in sells]
+
+            pos_data = p.to_dict()
+            pos_data['original_quantity'] = original_quantity
+            pos_data['sell_records'] = sell_records
+            pos_data['add_position_ratio'] = float(p.add_position_ratio) if p.add_position_ratio else 0
+            positions_data.append(pos_data)
+
         summary = profit_service.portfolio_summary(positions_data)
 
-        # 添加信号详情
-        signals = []
-        for p in positions:
+        # 添加信号详情（每个持仓的详细信息）
+        details = []
+        for i, p in enumerate(positions):
             if p.current_price:
+                pos_data = positions_data[i]
                 result = profit_service.calculate_profit(
                     p.cost_price,
                     p.current_price,
-                    p.quantity
+                    p.quantity,
+                    original_quantity=pos_data['original_quantity'],
+                    sell_records=pos_data['sell_records'],
+                    add_position_ratio=pos_data['add_position_ratio']
                 )
-                if result['stop_profit_signal'] or result['add_position_signal']:
-                    signals.append({
+                details.append({
+                    'position': {
+                        'id': p.id,
                         'symbol': p.symbol,
                         'name': p.name,
-                        **result
-                    })
+                        'asset_type': p.asset_type
+                    },
+                    **result
+                })
 
-        summary['signals'] = signals
+        summary['details'] = details
+        summary['signals'] = [d for d in details if d['stop_profit_signal'] or d['add_position_signal']]
 
         return success_response(summary)
     except Exception as e:
@@ -100,11 +138,15 @@ def get_risk_analysis():
 @analysis_bp.route('/analysis/signals', methods=['GET'])
 @login_required
 def get_signals():
-    """获取所有操作信号"""
+    """获取所有持仓状态（智能止盈策略，根据实际交易记录判断）
+    返回所有持仓的收益率、已加仓、已减仓信息，有操作建议时显示建议
+    """
     try:
         user = get_current_user()
-        positions = Position.query.filter_by(user_id=user.id).all()
+        # 只查询未清仓的持仓（数量大于0）
+        positions = Position.query.filter_by(user_id=user.id).filter(Position.quantity > 0).all()
 
+        all_positions_data = []
         stop_profit_signals = []
         add_position_signals = []
 
@@ -112,24 +154,82 @@ def get_signals():
             if not p.current_price:
                 continue
 
+            # 获取该持仓的所有交易记录（买入和卖出）
+            all_trades = Trade.query.filter_by(
+                user_id=user.id,
+                symbol=p.symbol
+            ).order_by(Trade.trade_date.desc()).limit(5).all()
+
+            # 获取卖出交易记录，计算原始持仓数量
+            sells = Trade.query.filter_by(
+                user_id=user.id,
+                symbol=p.symbol,
+                trade_type='sell'
+            ).order_by(Trade.trade_date).all()
+
+            # 获取买入交易记录，计算加仓情况
+            buys = Trade.query.filter_by(
+                user_id=user.id,
+                symbol=p.symbol,
+                trade_type='buy'
+            ).order_by(Trade.trade_date).all()
+
+            # 计算原始持仓数量 = 当前数量 + 已卖出数量
+            total_sold = sum(t.quantity for t in sells)
+            original_quantity = p.quantity + total_sold
+
+            # 构建卖出记录列表
+            sell_records = [{'date': t.trade_date, 'quantity': t.quantity} for t in sells]
+
+            # 构建交易记录列表（用于前端显示）
+            trade_records = [{
+                'date': t.trade_date.isoformat(),
+                'type': t.trade_type,
+                'quantity': t.quantity,
+                'price': float(t.price),
+                'amount': float(t.amount),
+                'reason': t.reason
+            } for t in all_trades]
+
+            # 传入实际数据，智能判断（传入持仓数量用于计算建议份额）
             result = profit_service.calculate_profit(
                 p.cost_price,
                 p.current_price,
-                p.quantity
+                p.quantity,
+                original_quantity=original_quantity,
+                sell_records=sell_records,
+                add_position_ratio=float(p.add_position_ratio) if p.add_position_ratio else 0
             )
 
             signal_data = {
                 'position_id': p.id,
                 'symbol': p.symbol,
                 'name': p.name,
+                'asset_type': p.asset_type,
                 'quantity': p.quantity,
+                'original_quantity': original_quantity,
                 'cost_price': float(p.cost_price),
                 'current_price': float(p.current_price),
                 'profit_rate': result['profit_rate'],
+                'profit_amount': result['profit_amount'],  # 从计算结果获取
                 'signal_level': result['signal_level'],
-                'suggestion': result['suggestion']
+                'suggestion': result['suggestion'],
+                'suggestion_quantity': result.get('suggestion_quantity', 0),  # 建议操作份额
+                'suggestion_amount': result.get('suggestion_amount', 0),  # 建议操作金额
+                'current_state': result.get('current_state', {}),
+                'sold_ratio': result.get('current_state', {}).get('sold_ratio', 0),
+                'add_position_ratio': result.get('current_state', {}).get('add_position_ratio', 0),
+                'trade_records': trade_records,  # 最近交易记录
+                'total_sold': total_sold,
+                'total_bought': sum(t.quantity for t in buys),
+                'stop_profit_signal': result['stop_profit_signal'],
+                'add_position_signal': result['add_position_signal']
             }
 
+            # 所有持仓都加入列表
+            all_positions_data.append(signal_data)
+
+            # 有信号的单独归类
             if result['stop_profit_signal']:
                 stop_profit_signals.append(signal_data)
 
@@ -137,8 +237,10 @@ def get_signals():
                 add_position_signals.append(signal_data)
 
         return success_response({
-            'stop_profit_signals': stop_profit_signals,
-            'add_position_signals': add_position_signals,
+            'all_positions': all_positions_data,  # 所有持仓的状态信息
+            'stop_profit_signals': stop_profit_signals,  # 有止盈信号的
+            'add_position_signals': add_position_signals,  # 有加仓信号的
+            'total_positions': len(all_positions_data),
             'total_stop_profit': len(stop_profit_signals),
             'total_add_position': len(add_position_signals)
         })
@@ -149,10 +251,11 @@ def get_signals():
 @analysis_bp.route('/analysis/distribution', methods=['GET'])
 @login_required
 def get_distribution():
-    """获取持仓分布"""
+    """获取持仓分布（只针对未清仓的持仓）"""
     try:
         user = get_current_user()
-        positions = Position.query.filter_by(user_id=user.id).all()
+        # 只查询未清仓的持仓（数量大于0）
+        positions = Position.query.filter_by(user_id=user.id).filter(Position.quantity > 0).all()
 
         # 按资产类型分布
         by_type = {}

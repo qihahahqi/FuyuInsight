@@ -236,6 +236,29 @@ def import_trades():
                 )
 
                 db.session.add(trade)
+
+                # 更新持仓
+                if position:
+                    if t['trade_type'] == 'buy':
+                        # 买入：更新成本价
+                        total_cost = float(position.total_cost) + amount
+                        total_quantity = position.quantity + t['quantity']
+                        position.cost_price = total_cost / total_quantity
+                        position.quantity = total_quantity
+                        position.total_cost = total_cost
+                    else:
+                        # 卖出：减少数量
+                        position.quantity -= t['quantity']
+                        position.total_cost = float(position.total_cost) - float(position.cost_price) * t['quantity']
+
+                        # 如果卖出后数量为0，重置相关字段（保留持仓记录以维护外键关系）
+                        if position.quantity <= 0:
+                            position.quantity = 0
+                            position.total_cost = 0
+                            position.market_value = 0
+                            position.profit_rate = 0
+                            position.current_price = None
+
                 imported += 1
 
             except Exception as e:

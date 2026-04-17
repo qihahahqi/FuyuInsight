@@ -5,6 +5,10 @@
 // API 基础路径
 const API_BASE = '/api/v1';
 
+// 持仓排序状态
+let positionsSortBy = 'created_at';
+let positionsSortOrder = 'desc';
+
 // 工具函数
 const utils = {
     // 格式化金额
@@ -282,10 +286,10 @@ const dashboardPage = {
             // 加载信号
             await this.loadSignals();
 
-            // 加载图表
+            // 加载图表 - 不传account_id让后端自动获取用户账户
             const daysInput = document.getElementById('profit-days');
             const days = daysInput ? parseInt(daysInput.value) : 30;
-            await Charts.renderProfitCurve('profit-chart', accountId || 1, parseInt(days));
+            await Charts.renderProfitCurve('profit-chart', accountId, parseInt(days));
             await Charts.renderDistribution('distribution-chart', accountId);
 
         } catch (error) {
@@ -294,8 +298,15 @@ const dashboardPage = {
     },
 
     async loadPositions(accountId = null) {
-        const params = accountId ? `?account_id=${accountId}` : '';
-        const positions = await utils.request(`${API_BASE}/positions${params}`);
+        // 构建请求参数
+        let params = [];
+        if (accountId) {
+            params.push(`account_id=${accountId}`);
+        }
+        params.push(`sort_by=${positionsSortBy}`);
+        params.push(`sort_order=${positionsSortOrder}`);
+
+        const positions = await utils.request(`${API_BASE}/positions?${params.join('&')}`);
         const tbody = document.querySelector('#positions-table tbody');
         tbody.innerHTML = '';
 
@@ -317,6 +328,31 @@ const dashboardPage = {
             `;
             tbody.appendChild(tr);
         });
+
+        // 更新排序图标
+        this.updateSortIcons();
+    },
+
+    updateSortIcons() {
+        // 更新表头排序图标
+        const headers = document.querySelectorAll('#positions-table th.sortable');
+        headers.forEach(th => {
+            th.classList.remove('asc', 'desc');
+        });
+
+        // 找到当前排序的列并添加图标
+        const sortByMap = {
+            'market_value': 5,  // 市值列索引
+            'profit_rate': 6    // 收益率列索引
+        };
+
+        if (sortByMap[positionsSortBy]) {
+            const columnIndex = sortByMap[positionsSortBy];
+            const header = document.querySelector(`#positions-table th:nth-child(${columnIndex + 1})`);
+            if (header) {
+                header.classList.add(positionsSortOrder);
+            }
+        }
     },
 
     async loadSignals() {
@@ -324,48 +360,236 @@ const dashboardPage = {
         const container = document.getElementById('signals-list');
         container.innerHTML = '';
 
-        if (signals.stop_profit_signals.length === 0 && signals.add_position_signals.length === 0) {
-            container.innerHTML = '<div class="text-muted" style="padding: 20px; text-align: center;">暂无操作信号</div>';
+        // 显示所有持仓状态
+        const allPositions = signals.all_positions || [];
+
+        if (allPositions.length === 0) {
+            container.innerHTML = '<div class="text-muted" style="padding: 20px; text-align: center;">暂无持仓数据</div>';
             return;
         }
 
-        signals.stop_profit_signals.forEach(s => {
-            const div = document.createElement('div');
-            div.className = 'signal-item stop-profit';
-            div.innerHTML = `
-                <div class="signal-title">🔴 ${s.name} 止盈信号</div>
-                <div class="signal-desc">收益率: ${utils.formatPercent(s.profit_rate)} | ${s.suggestion}</div>
-            `;
-            container.appendChild(div);
+        // 按收益率排序（盈利在前，亏损在后，按收益率绝对值排序）
+        allPositions.sort((a, b) => {
+            if (a.profit_rate >= 0 && b.profit_rate < 0) return -1;
+            if (a.profit_rate < 0 && b.profit_rate >= 0) return 1;
+            return b.profit_rate - a.profit_rate;
         });
 
-        signals.add_position_signals.forEach(s => {
+        allPositions.forEach(p => {
             const div = document.createElement('div');
-            div.className = 'signal-item add-position';
+            const hasSignal = p.stop_profit_signal || p.add_position_signal;
+            div.className = hasSignal ? (p.stop_profit_signal ? 'signal-item stop-profit' : 'signal-item add-position') : 'signal-item normal';
+
+            // 构建状态信息：收益率 + 已加仓 + 已减仓
+            const profitLabel = p.profit_rate >= 0 ? '收益率' : '浮亏';
+            const profitValue = utils.formatPercent(p.profit_rate);
+            const addRatioLabel = `已加仓${(p.add_position_ratio * 100).toFixed(0)}%`;
+            const soldRatioLabel = `已减仓${(p.sold_ratio * 100).toFixed(0)}%`;
+
+            // 建议信息（有信号时显示建议份额和金额）
+            let suggestionHtml = '';
+            if (hasSignal && p.suggestion) {
+                suggestionHtml = `<div class="signal-desc">${p.suggestion}</div>`;
+                // 如果有建议操作份额/金额，添加快捷操作按钮
+                if (p.suggestion_quantity > 0 && p.suggestion_amount > 0) {
+                    suggestionHtml += `
+                        <div style="margin-top: 8px;">
+                            <button class="btn btn-sm btn-outline" onclick="event.stopPropagation(); applySuggestion(${p.position_id}, '${p.symbol}', '${p.name}', ${p.current_price}, ${p.suggestion_quantity}, '${p.asset_type}', '${p.stop_profit_signal ? 'sell' : 'buy'}')">
+                                快捷操作
+                            </button>
+                        </div>
+                    `;
+                }
+            } else {
+                // 无信号时显示持有状态
+                suggestionHtml = `<div class="signal-desc" style="color: var(--text-muted);">${p.signal_level || '继续持有'}</div>`;
+            }
+
             div.innerHTML = `
-                <div class="signal-title">🟡 ${s.name} 加仓信号</div>
-                <div class="signal-desc">浮亏: ${utils.formatPercent(s.profit_rate)} | ${s.suggestion}</div>
+                <div class="signal-title">
+                    ${hasSignal ? (p.stop_profit_signal ? '🔴' : '🟡') : '⚪'}
+                    ${p.name} <small>${p.symbol}</small>
+                    <span style="float: right; font-weight: 500; color: ${p.profit_rate >= 0 ? 'var(--danger-color)' : 'var(--success-color)'};">
+                        ${profitValue}
+                    </span>
+                </div>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+                    ${addRatioLabel} | ${soldRatioLabel}
+                </div>
+                ${suggestionHtml}
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+                    持有${p.quantity}份 | 成本: ${p.cost_price.toFixed(3)} | 现价: ${p.current_price.toFixed(3)}
+                </div>
             `;
+            div.onclick = () => showPositionDetail(p.position_id);
+            div.style.cursor = 'pointer';
             container.appendChild(div);
         });
     },
 
     getAssetTypeLabel(type) {
         const labels = {
+            // 市价型产品
+            'stock': '股票',
             'etf_index': '宽基ETF',
             'etf_sector': '行业ETF',
             'fund': '基金',
-            'stock': '股票'
+            'gold': '黄金',
+            'silver': '白银',
+            // 固定收益类
+            'bank_deposit': '银行定期存款',
+            'bank_current': '银行活期存款',
+            'bank_wealth': '银行理财产品',
+            'treasury_bond': '国债',
+            'corporate_bond': '企业债',
+            'money_fund': '货币基金',
+            // 其他产品
+            'insurance': '保险理财',
+            'trust': '信托产品',
+            'other': '其他'
         };
         return labels[type] || type;
+    },
+
+    getProductCategory(assetType) {
+        const categories = {
+            // 市价型
+            'stock': 'market',
+            'etf_index': 'market',
+            'etf_sector': 'market',
+            'fund': 'market',
+            'gold': 'market',
+            'silver': 'market',
+            // 固定收益型
+            'bank_deposit': 'fixed_income',
+            'bank_current': 'fixed_income',
+            'bank_wealth': 'fixed_income',
+            'treasury_bond': 'fixed_income',
+            'corporate_bond': 'fixed_income',
+            'money_fund': 'fixed_income',
+            // 手动录入型
+            'insurance': 'manual',
+            'trust': 'manual',
+            'other': 'manual'
+        };
+        return categories[assetType] || 'market';
+    },
+
+    getAssetTypeGroups() {
+        return [
+            {
+                group: '市价型产品',
+                types: [
+                    { value: 'stock', label: '股票' },
+                    { value: 'etf_index', label: '宽基ETF' },
+                    { value: 'etf_sector', label: '行业ETF' },
+                    { value: 'fund', label: '基金' },
+                    { value: 'gold', label: '黄金' },
+                    { value: 'silver', label: '白银' }
+                ]
+            },
+            {
+                group: '固定收益类',
+                types: [
+                    { value: 'bank_deposit', label: '银行定期存款' },
+                    { value: 'bank_current', label: '银行活期存款' },
+                    { value: 'bank_wealth', label: '银行理财产品' },
+                    { value: 'treasury_bond', label: '国债' },
+                    { value: 'corporate_bond', label: '企业债' },
+                    { value: 'money_fund', label: '货币基金' }
+                ]
+            },
+            {
+                group: '其他产品',
+                types: [
+                    { value: 'insurance', label: '保险理财' },
+                    { value: 'trust', label: '信托产品' },
+                    { value: 'other', label: '其他' }
+                ]
+            }
+        ];
+    },
+
+    getProductParamFields() {
+        return {
+            interest_rate: { name: '年化利率', type: 'number', unit: '%', placeholder: '如: 3.5' },
+            start_date: { name: '起息日', type: 'date' },
+            end_date: { name: '到期日', type: 'date' },
+            redeemable: { name: '可提前赎回', type: 'checkbox' },
+            payment_cycle: {
+                name: '付息方式', type: 'select',
+                options: [
+                    { value: 'at_maturity', label: '到期付息' },
+                    { value: 'monthly', label: '按月付息' },
+                    { value: 'quarterly', label: '按季付息' },
+                    { value: 'yearly', label: '按年付息' }
+                ]
+            },
+            interest_type: {
+                name: '计息方式', type: 'select',
+                options: [
+                    { value: 'simple', label: '单利' },
+                    { value: 'compound', label: '复利' }
+                ]
+            },
+            issuer: { name: '发行机构', type: 'text', placeholder: '如: 工商银行' },
+            risk_level: {
+                name: '风险等级', type: 'select',
+                options: [
+                    { value: 'R1', label: 'R1-低风险' },
+                    { value: 'R2', label: 'R2-中低风险' },
+                    { value: 'R3', label: 'R3-中风险' },
+                    { value: 'R4', label: 'R4-中高风险' },
+                    { value: 'R5', label: 'R5-高风险' }
+                ]
+            },
+            weight: { name: '重量', type: 'number', unit: '克', placeholder: '如: 10' },
+            purity: { name: '纯度', type: 'number', placeholder: '如: 0.9999' },
+            buy_channel: {
+                name: '购买渠道', type: 'select',
+                options: [
+                    { value: 'bank', label: '银行' },
+                    { value: 'platform', label: '交易平台' },
+                    { value: 'physical', label: '实物购买' }
+                ]
+            }
+        };
+    },
+
+    getFormFieldsForAssetType(assetType) {
+        const fieldMapping = {
+            'stock': [],
+            'etf_index': [],
+            'etf_sector': [],
+            'fund': [],
+            'gold': ['weight', 'purity', 'buy_channel'],
+            'silver': ['weight', 'purity', 'buy_channel'],
+            'bank_deposit': ['interest_rate', 'start_date', 'end_date', 'redeemable'],
+            'bank_current': ['interest_rate'],
+            'bank_wealth': ['interest_rate', 'start_date', 'end_date', 'redeemable', 'risk_level'],
+            'treasury_bond': ['interest_rate', 'start_date', 'end_date', 'payment_cycle'],
+            'corporate_bond': ['interest_rate', 'start_date', 'end_date', 'payment_cycle', 'issuer'],
+            'money_fund': ['interest_rate'],
+            'insurance': ['interest_rate', 'start_date', 'end_date', 'issuer'],
+            'trust': ['interest_rate', 'start_date', 'end_date', 'issuer'],
+            'other': []
+        };
+        return fieldMapping[assetType] || [];
     }
 };
 
 // 持仓管理页面
 const positionsPage = {
     async load(accountId = null) {
-        const params = accountId ? `?account_id=${accountId}` : '';
-        const positions = await utils.request(`${API_BASE}/positions${params}`);
+        // 构建请求参数
+        let params = [];
+        if (accountId) {
+            params.push(`account_id=${accountId}`);
+        }
+        params.push(`sort_by=${positionsSortBy}`);
+        params.push(`sort_order=${positionsSortOrder}`);
+
+        const positions = await utils.request(`${API_BASE}/positions?${params.join('&')}`);
         const tbody = document.querySelector('#positions-full-table tbody');
         tbody.innerHTML = '';
 
@@ -391,6 +615,32 @@ const positionsPage = {
             `;
             tbody.appendChild(tr);
         });
+
+        // 更新排序图标
+        this.updateSortIcons();
+    },
+
+    updateSortIcons() {
+        // 更新表头排序图标
+        const headers = document.querySelectorAll('#positions-full-table th.sortable');
+        headers.forEach(th => {
+            th.classList.remove('asc', 'desc');
+        });
+
+        // 找到当前排序的列并添加图标
+        const sortByMap = {
+            'total_cost': 7,   // 总成本列索引
+            'market_value': 8, // 市值列索引
+            'profit_rate': 9   // 收益率列索引
+        };
+
+        if (sortByMap[positionsSortBy]) {
+            const columnIndex = sortByMap[positionsSortBy];
+            const header = document.querySelector(`#positions-full-table th:nth-child(${columnIndex + 1})`);
+            if (header) {
+                header.classList.add(positionsSortOrder);
+            }
+        }
     }
 };
 
@@ -440,6 +690,10 @@ const analysisPage = {
             const div = document.createElement('div');
             div.className = 'signal-item';
             const profitClass = d.profit_rate >= 0 ? 'profit' : 'loss';
+            // 获取已加仓和已减仓比例
+            const addRatio = d.current_state?.add_position_ratio || 0;
+            const soldRatio = d.current_state?.sold_ratio || 0;
+
             div.innerHTML = `
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <div>
@@ -450,12 +704,16 @@ const analysisPage = {
                         ${utils.formatPercent(d.profit_rate)}
                     </div>
                 </div>
+                <div style="margin-top: 4px; font-size: 12px; color: var(--text-secondary);">
+                    已加仓${(addRatio * 100).toFixed(0)}% | 已减仓${(soldRatio * 100).toFixed(0)}%
+                </div>
                 <div style="margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
                     成本: ${utils.formatMoney(d.total_cost)} | 市值: ${utils.formatMoney(d.market_value)} |
                     盈亏: <span class="${profitClass}">${utils.formatMoney(d.profit_amount)}</span>
                 </div>
                 ${d.signal_level !== '持有' && d.signal_level !== '观察' ?
-                    `<div style="margin-top: 8px;"><span class="tag ${d.stop_profit_signal ? 'success' : 'warning'}">${d.signal_level}</span> ${d.suggestion}</div>` : ''}
+                    `<div style="margin-top: 8px;"><span class="tag ${d.stop_profit_signal ? 'success' : 'warning'}">${d.signal_level}</span> ${d.suggestion}</div>` :
+                    `<div style="margin-top: 8px; color: var(--text-muted);">${d.signal_level || '继续持有'}</div>`}
             `;
             container.appendChild(div);
         });
@@ -520,6 +778,88 @@ const valuationPage = {
     }
 };
 
+// 下载估值数据模板
+async function downloadValuationTemplate() {
+    try {
+        const response = await Auth.fetch(`${API_BASE}/valuations/template`);
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '估值数据导入模板.xlsx';
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+    } catch (error) {
+        utils.showToast('下载模板失败', 'error');
+    }
+}
+
+// 导入估值数据
+async function importValuations(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const response = await Auth.fetch(`${API_BASE}/valuations/import`, {
+            method: 'POST',
+            body: formData
+            // 不设置 Content-Type，让浏览器自动设置 multipart/form-data
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.message || '导入失败');
+        }
+
+        const result = await response.json();
+        if (!result.success) {
+            throw new Error(result.message || '导入失败');
+        }
+
+        utils.showToast(result.data.message || `成功导入 ${result.data.success_count} 条数据`);
+        await valuationPage.load();
+    } catch (error) {
+        utils.showToast('导入失败: ' + error.message, 'error');
+    }
+}
+
+// 导出估值数据
+async function exportValuations() {
+    try {
+        const response = await Auth.fetch(`${API_BASE}/valuations/export`);
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.message || '导出失败');
+        }
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `估值数据_${new Date().toISOString().slice(0, 10)}.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+    } catch (error) {
+        utils.showToast(error.message || '导出失败', 'error');
+    }
+}
+
+// 绑定估值导入文件选择事件
+document.addEventListener('DOMContentLoaded', function() {
+    const valuationImportFile = document.getElementById('valuation-import-file');
+    if (valuationImportFile) {
+        valuationImportFile.addEventListener('change', function(e) {
+            if (e.target.files.length > 0) {
+                importValuations(e.target.files[0]);
+                e.target.value = ''; // 清空选择
+            }
+        });
+    }
+});
+
 // 回测页面
 const backtestPage = {
     strategies: [],
@@ -544,6 +884,9 @@ const backtestPage = {
 
         // 加载已导入的数据列表
         await loadImportedDataList();
+
+        // 加载快速选择列表
+        await loadQuickSelectSymbols();
 
         // 初始化日期选择器（使用Flatpickr）
         const today = new Date().toISOString().split('T')[0];
@@ -649,12 +992,32 @@ const backtestPage = {
             case '2y': start = new Date(new Date().setFullYear(today.getFullYear() - 2)); break;
             case '3y': start = new Date(new Date().setFullYear(today.getFullYear() - 3)); break;
             case '5y': start = new Date(new Date().setFullYear(today.getFullYear() - 5)); break;
-            case 'all': start = new Date('2020-01-01'); break;
+            case 'all': start = new Date('2000-01-01'); break;
             default: start = new Date(new Date().setMonth(today.getMonth() - 6));
         }
 
         const startDateStr = start.toISOString().split('T')[0];
-        DatePicker.setRange(startId, endId, startDateStr, end);
+
+        // 设置flatpickr日期选择器（如果存在）
+        const startPicker = document.querySelector(`#${startId}`)?._flatpickr;
+        const endPicker = document.querySelector(`#${endId}`)?._flatpickr;
+
+        if (startPicker) {
+            startPicker.setDate(startDateStr);
+        }
+        if (endPicker) {
+            endPicker.setDate(end);
+        }
+
+        // 同时设置原生input值（确保生效）
+        const startInput = document.getElementById(startId);
+        const endInput = document.getElementById(endId);
+        if (startInput) {
+            startInput.value = startDateStr;
+        }
+        if (endInput) {
+            endInput.value = end;
+        }
     },
 
     getSelectedStrategies() {
@@ -774,22 +1137,75 @@ const aiPage = {
 
     async loadHistory() {
         try {
-            const history = await utils.request(`${API_BASE}/ai/history`);
+            // 加载两种历史：旧的分析历史和新的异步任务历史
+            const oldHistory = await utils.request(`${API_BASE}/ai/history`);
+            const taskHistory = await utils.request(`${API_BASE}/ai/tasks`);
             const container = document.getElementById('ai-history-list');
 
-            if (!history || history.length === 0) {
+            // 合并历史记录
+            const allHistory = [];
+
+            // 旧历史记录
+            if (oldHistory && oldHistory.length > 0) {
+                oldHistory.forEach(h => {
+                    allHistory.push({
+                        id: h.id,
+                        type: 'old',
+                        created_at: h.created_at,
+                        analysis_type: h.analysis_type,
+                        symbol: h.symbol,
+                        model_name: h.model_name,
+                        overall_score: h.overall_score,
+                        status: 'completed'
+                    });
+                });
+            }
+
+            // 新任务历史记录（只显示已完成的）
+            if (taskHistory && taskHistory.length > 0) {
+                taskHistory.forEach(t => {
+                    if (t.status === 'completed' || t.status === 'failed') {
+                        allHistory.push({
+                            id: t.id,
+                            type: 'task',
+                            created_at: t.created_at,
+                            analysis_type: t.analysis_type,
+                            symbol: t.symbol,
+                            model_name: t.model_name,
+                            overall_score: t.overall_score,
+                            status: t.status
+                        });
+                    }
+                });
+            }
+
+            // 按时间排序
+            allHistory.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            if (allHistory.length === 0) {
                 container.innerHTML = '<div class="text-muted" style="text-align: center; padding: 20px;">暂无历史记录</div>';
                 return;
             }
 
-            let html = '<table class="data-table"><thead><tr><th>时间</th><th>类型</th><th>标的</th><th>操作</th></tr></thead><tbody>';
-            history.forEach(h => {
+            let html = '<table class="data-table"><thead><tr><th>时间</th><th>类型</th><th>标的</th><th>模型</th><th>评分</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+            allHistory.forEach(h => {
+                const scoreDisplay = h.overall_score ? `<span class="tag ${h.overall_score >= 6 ? 'success' : h.overall_score >= 4 ? 'warning' : 'danger'}">${h.overall_score}/10</span>` : '--';
+                const statusDisplay = h.status === 'completed' ? '<span class="tag success">完成</span>' : h.status === 'failed' ? '<span class="tag danger">失败</span>' : '<span class="tag">完成</span>';
+                const viewFunc = h.type === 'task' ? `viewAITaskResult(${h.id})` : `viewAIHistory(${h.id})`;
+                const deleteFunc = h.type === 'task' ? `deleteAITask(${h.id})` : `deleteAIHistory(${h.id})`;
+
                 html += `
                     <tr>
                         <td>${utils.formatDate(h.created_at)}</td>
-                        <td>${h.analysis_type === 'single' ? '单标的' : '全仓'}</td>
-                        <td>${h.symbol || '全部'}</td>
-                        <td><button class="btn btn-sm btn-secondary" onclick="viewAIHistory(${h.id})">查看</button></td>
+                        <td><span class="tag">${h.analysis_type === 'single' ? '单标的' : '全仓'}</span></td>
+                        <td>${h.symbol || '全部持仓'}</td>
+                        <td>${h.model_name || '--'}</td>
+                        <td>${scoreDisplay}</td>
+                        <td>${statusDisplay}</td>
+                        <td>
+                            <button class="btn btn-sm btn-secondary" onclick="${viewFunc}">查看</button>
+                            <button class="btn btn-sm btn-danger" onclick="${deleteFunc}" style="margin-left: 4px;">删除</button>
+                        </td>
                     </tr>
                 `;
             });
@@ -840,6 +1256,12 @@ const settingsPage = {
             const tokenInput = document.getElementById('tushare-token');
             const baseUrlInput = document.getElementById('tushare-base-url');
             const statusText = document.getElementById('tushare-status-text');
+
+            // 检查元素是否存在（可能当前页面不在设置页面）
+            if (!tokenInput || !baseUrlInput || !statusText) {
+                console.log('Tushare配置元素不存在，跳过加载');
+                return;
+            }
 
             if (tushareConfig.has_token) {
                 tokenInput.value = '******';
@@ -895,11 +1317,21 @@ const settingsPage = {
                     fundTag.style.background = '#007bff';
                     if (fundType) fundType.value = 'tushare';
                     if (fundStatus) fundStatus.textContent = '状态: ✅ 使用用户配置的Tushare';
-                } else {
-                    fundTag.textContent = '天天基金 + AKShare';
+                } else if (fundConfig.current === 'akshare') {
+                    fundTag.textContent = 'AKShare';
+                    fundTag.style.background = '#fd7e14';
+                    if (fundType) fundType.value = 'akshare';
+                    if (fundStatus) fundStatus.textContent = '状态: ✅ 优先使用AKShare';
+                } else if (fundConfig.current === 'eastmoney') {
+                    fundTag.textContent = '天天基金';
                     fundTag.style.background = '#17a2b8';
+                    if (fundType) fundType.value = 'eastmoney';
+                    if (fundStatus) fundStatus.textContent = '状态: ✅ 优先使用天天基金';
+                } else {
+                    fundTag.textContent = 'AKShare + 天天基金';
+                    fundTag.style.background = '#28a745';
                     if (fundType) fundType.value = 'default';
-                    if (fundStatus) fundStatus.textContent = '状态: ✅ 使用免费数据源';
+                    if (fundStatus) fundStatus.textContent = '状态: ✅ 使用免费数据源（自动切换）';
                 }
             }
         } catch (error) {
@@ -914,7 +1346,14 @@ const modalManager = {
         document.getElementById('modal-title').textContent = title;
         document.getElementById('modal-body').innerHTML = content;
         document.getElementById('modal-footer').innerHTML = footer;
-        document.getElementById('modal-overlay').classList.add('show');
+        const overlay = document.getElementById('modal-overlay');
+        overlay.classList.add('show');
+
+        // 阻止modal内容区域的点击事件冒泡到overlay
+        const modal = document.getElementById('modal-container');
+        modal.addEventListener('click', (e) => {
+            e.stopPropagation();
+        }, { once: true });
     },
 
     close() {
@@ -922,32 +1361,70 @@ const modalManager = {
     }
 };
 
+// 全局ESC关闭弹窗
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' || e.key === 'Esc') {
+        // 关闭主弹窗
+        const modalOverlay = document.getElementById('modal-overlay');
+        if (modalOverlay && modalOverlay.classList.contains('show')) {
+            closeModal();
+            return;
+        }
+        // 关闭持仓详情弹窗
+        const detailModal = document.getElementById('position-detail-modal');
+        if (detailModal && detailModal.style.display === 'flex') {
+            closePositionDetail();
+            return;
+        }
+    }
+});
+
 // 显示持仓模态框
 function showPositionModal(position = null) {
     const isEdit = position !== null;
     const title = isEdit ? '编辑持仓' : '新增持仓';
+
+    // 生成资产类型选择器（分组显示）
+    let assetTypeOptions = '';
+    dashboardPage.getAssetTypeGroups().forEach(group => {
+        assetTypeOptions += `<optgroup label="${group.group}">`;
+        group.types.forEach(type => {
+            const selected = isEdit && position.asset_type === type.value ? 'selected' : '';
+            assetTypeOptions += `<option value="${type.value}" ${selected}>${type.label}</option>`;
+        });
+        assetTypeOptions += '</optgroup>';
+    });
+
+    // 获取当前资产类型的动态字段（编辑模式）
+    let dynamicFieldsHtml = '';
+    if (isEdit && position.asset_type) {
+        dynamicFieldsHtml = renderDynamicFields(position.asset_type, position.product_params || {});
+    }
+
+    // 默认资产类型
+    const defaultAssetType = isEdit ? position.asset_type : 'stock';
+    const defaultCategory = dashboardPage.getProductCategory(defaultAssetType);
+
     const content = `
         <form id="position-form">
             <div class="form-grid">
-                <div class="form-group">
-                    <label>标的代码 *</label>
-                    <input type="text" name="symbol" class="form-input" required
-                           value="${isEdit ? position.symbol : ''}" ${isEdit ? 'readonly' : ''}>
+                <div class="form-group" id="symbol-group">
+                    <label id="symbol-label">产品代码</label>
+                    <input type="text" name="symbol" id="symbol-input" class="form-input"
+                           value="${isEdit ? position.symbol : ''}" placeholder="如: 000001">
+                    <small id="symbol-hint" style="color: #666; font-size: 12px;"></small>
                 </div>
                 <div class="form-group">
-                    <label>标的名称 *</label>
+                    <label>产品名称 *</label>
                     <input type="text" name="name" class="form-input" required
-                           value="${isEdit ? position.name : ''}">
+                           value="${isEdit ? position.name : ''}" placeholder="如: 招商银行定期存款">
                 </div>
             </div>
             <div class="form-grid">
                 <div class="form-group">
                     <label>资产类型 *</label>
-                    <select name="asset_type" class="form-input" required>
-                        <option value="etf_index" ${isEdit && position.asset_type === 'etf_index' ? 'selected' : ''}>宽基ETF</option>
-                        <option value="etf_sector" ${isEdit && position.asset_type === 'etf_sector' ? 'selected' : ''}>行业ETF</option>
-                        <option value="fund" ${isEdit && position.asset_type === 'fund' ? 'selected' : ''}>基金</option>
-                        <option value="stock" ${isEdit && position.asset_type === 'stock' ? 'selected' : ''}>股票</option>
+                    <select name="asset_type" class="form-input" required onchange="onAssetTypeChange(this.value, ${isEdit ? JSON.stringify(position.product_params || {}) : 'null'})">
+                        ${assetTypeOptions}
                     </select>
                 </div>
                 <div class="form-group">
@@ -957,27 +1434,32 @@ function showPositionModal(position = null) {
                         <option value="core" ${isEdit && position.category === 'core' ? 'selected' : ''}>核心仓位</option>
                         <option value="satellite" ${isEdit && position.category === 'satellite' ? 'selected' : ''}>卫星仓位</option>
                         <option value="aggressive" ${isEdit && position.category === 'aggressive' ? 'selected' : ''}>进攻仓位</option>
+                        <option value="stable" ${isEdit && position.category === 'stable' ? 'selected' : ''}>稳健仓位</option>
                     </select>
                 </div>
             </div>
             <div class="form-grid">
                 <div class="form-group">
-                    <label>数量 *</label>
+                    <label id="quantity-label">数量/份额 *</label>
                     <input type="number" name="quantity" class="form-input" required min="1"
-                           value="${isEdit ? position.quantity : ''}">
+                           value="${isEdit ? position.quantity : '1'}">
                 </div>
                 <div class="form-group">
-                    <label>成本价 *</label>
-                    <input type="number" name="cost_price" class="form-input" required step="0.0001"
-                           value="${isEdit ? position.cost_price : ''}">
+                    <label id="cost-label">买入价格/本金 *</label>
+                    <input type="number" name="cost_price" class="form-input" required step="0.01"
+                           value="${isEdit ? position.cost_price : ''}" placeholder="买入价格或本金金额">
                 </div>
             </div>
-            <div class="form-grid">
+            <div class="form-grid" id="current-price-row">
                 <div class="form-group">
                     <label>当前价格</label>
                     <input type="number" name="current_price" class="form-input" step="0.0001"
                            value="${isEdit && position.current_price ? position.current_price : ''}">
                 </div>
+            </div>
+            <!-- 动态字段区域 -->
+            <div id="dynamic-fields">
+                ${dynamicFieldsHtml}
             </div>
             <div class="form-group">
                 <label>备注</label>
@@ -990,18 +1472,199 @@ function showPositionModal(position = null) {
         <button class="btn btn-primary" onclick="savePosition(${isEdit ? position.id : null})">保存</button>
     `;
     modalManager.show(title, content, footer);
+
+    // 初始化时触发一次资产类型变化
+    if (!isEdit) {
+        onAssetTypeChange('stock', null);
+    }
+}
+
+// 资产类型变化时的动态字段渲染
+function onAssetTypeChange(assetType, existingParams = null) {
+    const category = dashboardPage.getProductCategory(assetType);
+    const currentPriceRow = document.getElementById('current-price-row');
+    const quantityLabel = document.getElementById('quantity-label');
+    const costLabel = document.getElementById('cost-label');
+    const dynamicFieldsContainer = document.getElementById('dynamic-fields');
+    const symbolGroup = document.getElementById('symbol-group');
+    const symbolLabel = document.getElementById('symbol-label');
+    const symbolInput = document.getElementById('symbol-input');
+    const symbolHint = document.getElementById('symbol-hint');
+
+    // 根据产品类别调整标签和显示
+    if (category === 'fixed_income' || category === 'manual') {
+        currentPriceRow.style.display = 'none';
+        quantityLabel.textContent = '数量/份额';
+        costLabel.textContent = '本金金额 *';
+
+        // 固定收益/手动产品：代码可选，显示提示
+        symbolLabel.textContent = '产品代码';
+        symbolInput.removeAttribute('required');
+        symbolInput.placeholder = '可选，留空自动生成';
+        symbolHint.textContent = '可自定义代码（如：GY001），留空系统自动生成';
+        symbolHint.style.display = 'block';
+    } else if (assetType === 'gold' || assetType === 'silver') {
+        currentPriceRow.style.display = 'grid';
+        quantityLabel.textContent = '重量(克)';
+        costLabel.textContent = '买入单价 *';
+
+        // 贵金属：代码可选
+        symbolLabel.textContent = '产品代码';
+        symbolInput.removeAttribute('required');
+        symbolInput.placeholder = '可选，如 AU001';
+        symbolHint.textContent = '可自定义代码，留空系统自动生成';
+        symbolHint.style.display = 'block';
+    } else {
+        currentPriceRow.style.display = 'grid';
+        quantityLabel.textContent = '数量/份额 *';
+        costLabel.textContent = '成本价 *';
+
+        // 市价产品：代码必填
+        symbolLabel.textContent = '产品代码 *';
+        symbolInput.setAttribute('required', 'required');
+        symbolInput.placeholder = '如: 000001';
+        symbolHint.textContent = '请输入股票/ETF/基金代码（纯数字）';
+        symbolHint.style.display = 'block';
+    }
+
+    // 渲染动态字段
+    dynamicFieldsContainer.innerHTML = renderDynamicFields(assetType, existingParams || {});
+}
+
+// 渲染动态字段
+function renderDynamicFields(assetType, existingParams) {
+    const fieldKeys = dashboardPage.getFormFieldsForAssetType(assetType);
+    const allFields = dashboardPage.getProductParamFields();
+
+    let html = '';
+    if (fieldKeys.length > 0) {
+        html = '<div class="form-grid" style="grid-template-columns: repeat(2, 1fr);">';
+    }
+
+    fieldKeys.forEach(key => {
+        const field = allFields[key];
+        if (!field) return;
+
+        const value = existingParams[key] || '';
+        const fieldId = `param_${key}`;
+
+        html += `<div class="form-group"><label>${field.name}</label>`;
+
+        switch (field.type) {
+            case 'select':
+                html += `<select name="params_${key}" id="${fieldId}" class="form-input">`;
+                html += `<option value="">请选择</option>`;
+                field.options.forEach(opt => {
+                    const selected = value === opt.value ? 'selected' : '';
+                    html += `<option value="${opt.value}" ${selected}>${opt.label}</option>`;
+                });
+                html += '</select>';
+                break;
+
+            case 'checkbox':
+                const checked = value === true || value === 'true' ? 'checked' : '';
+                html += `<label class="checkbox-label" style="display: flex; align-items: center; gap: 8px;">
+                    <input type="checkbox" name="params_${key}" id="${fieldId}" ${checked}>
+                    <span>${field.name}</span>
+                </label>`;
+                break;
+
+            case 'date':
+                html += `<input type="date" name="params_${key}" id="${fieldId}" class="form-input" value="${value}">`;
+                break;
+
+            default: // text, number
+                const step = field.type === 'number' ? 'step="0.0001"' : '';
+                const placeholder = field.placeholder ? `placeholder="${field.placeholder}"` : '';
+                const unit = field.unit ? ` <span style="color: #666;">${field.unit}</span>` : '';
+                html += `<input type="${field.type}" name="params_${key}" id="${fieldId}" class="form-input" ${step} ${placeholder} value="${value}">${unit}`;
+        }
+
+        html += '</div>';
+    });
+
+    if (fieldKeys.length > 0) {
+        html += '</div>';
+    }
+
+    return html;
 }
 
 // 保存持仓
 async function savePosition(id = null) {
     const form = document.getElementById('position-form');
     const formData = new FormData(form);
-    const data = Object.fromEntries(formData.entries());
+    const data = {};
+    const params = {};
+
+    // 分离基础字段和参数字段
+    for (let [key, value] of formData.entries()) {
+        if (key.startsWith('params_')) {
+            params[key.substring(7)] = value;
+        } else {
+            data[key] = value;
+        }
+    }
 
     // 转换数值类型
-    data.quantity = parseInt(data.quantity);
-    data.cost_price = parseFloat(data.cost_price);
-    if (data.current_price) data.current_price = parseFloat(data.current_price);
+    data.quantity = parseInt(data.quantity) || 1;
+    data.cost_price = parseFloat(data.cost_price) || 0;
+
+    // 设置产品类别
+    data.product_category = dashboardPage.getProductCategory(data.asset_type);
+
+    // 处理产品代码：非市价产品可自动生成
+    if (!data.symbol || data.symbol.trim() === '') {
+        if (data.product_category === 'fixed_income') {
+            // 固定收益产品：FI_年月日_随机数
+            const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+            const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+            data.symbol = `FI_${dateStr}_${random}`;
+        } else if (data.product_category === 'manual') {
+            // 手动录入产品：MF_年月日_随机数
+            const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+            const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+            data.symbol = `MF_${dateStr}_${random}`;
+        } else if (data.asset_type === 'gold') {
+            // 黄金：AU_随机数
+            const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+            data.symbol = `AU_${random}`;
+        } else if (data.asset_type === 'silver') {
+            // 白银：AG_随机数
+            const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+            data.symbol = `AG_${random}`;
+        }
+    }
+
+    // 添加产品参数
+    if (Object.keys(params).length > 0) {
+        // 处理复选框
+        const checkboxFields = ['redeemable'];
+        checkboxFields.forEach(field => {
+            const checkbox = document.getElementById(`param_${field}`);
+            if (checkbox) {
+                params[field] = checkbox.checked;
+            }
+        });
+
+        // 处理数值字段
+        const numberFields = ['interest_rate', 'weight', 'purity'];
+        numberFields.forEach(field => {
+            if (params[field] !== undefined && params[field] !== '') {
+                params[field] = parseFloat(params[field]);
+            }
+        });
+
+        data.product_params = params;
+
+        // 从参数中提取到期日和风险等级
+        if (params.end_date) {
+            data.mature_date = params.end_date;
+        }
+        if (params.risk_level) {
+            data.risk_level = params.risk_level;
+        }
+    }
 
     try {
         if (id) {
@@ -1032,6 +1695,11 @@ async function showPositionDetail(id) {
 
     body.innerHTML = '<div class="loading">加载中...</div>';
     modal.style.display = 'flex';
+
+    // 阻止modal内容区域的点击事件冒泡
+    modal.querySelector('.modal').addEventListener('click', (e) => {
+        e.stopPropagation();
+    }, { once: true });
 
     try {
         const detail = await utils.request(`${API_BASE}/positions/${id}/detail`);
@@ -1090,6 +1758,16 @@ async function showPositionDetail(id) {
                         </div>
                     </div>
                     ${basic.notes ? `<div style="margin-top: 12px;"><strong>备注:</strong> ${basic.notes}</div>` : ''}
+                </div>
+            </div>
+
+            <!-- 快捷操作 -->
+            <div class="card" style="margin-bottom: 16px;">
+                <div class="card-header"><h4>快捷操作</h4></div>
+                <div class="card-body" style="display: flex; gap: 12px; flex-wrap: wrap;">
+                    <button class="btn btn-success" onclick="showQuickTradeModal(${id}, '${basic.symbol}', '${basic.name}', 'buy', ${basic.current_price || basic.cost_price}, '${basic.asset_type}', ${basic.quantity})">📈 买入</button>
+                    <button class="btn btn-danger" onclick="showQuickTradeModal(${id}, '${basic.symbol}', '${basic.name}', 'sell', ${basic.current_price || basic.cost_price}, '${basic.asset_type}', ${basic.quantity})">📉 卖出</button>
+                    <button class="btn btn-secondary" onclick="editPosition(${id})">✏️ 编辑持仓</button>
                 </div>
             </div>
         `;
@@ -1234,11 +1912,14 @@ async function showPositionDetail(id) {
         }
 
         // 交易记录
-        if (trades.length > 0) {
-            html += `
-                <div class="card">
-                    <div class="card-header"><h4>最近交易记录</h4></div>
-                    <div class="card-body">
+        html += `
+            <div class="card">
+                <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                    <h4>交易记录</h4>
+                    <button class="btn btn-sm btn-primary" onclick="showQuickTradeModal(${id}, '${basic.symbol}', '${basic.name}', 'buy', ${basic.current_price || basic.cost_price}, '${basic.asset_type}', ${basic.quantity})">+ 新增交易</button>
+                </div>
+                <div class="card-body">
+                    ${trades.length > 0 ? `
                         <table class="data-table">
                             <thead>
                                 <tr><th>日期</th><th>类型</th><th>数量</th><th>价格</th><th>金额</th><th>理由</th></tr>
@@ -1256,10 +1937,10 @@ async function showPositionDetail(id) {
                                 `).join('')}
                             </tbody>
                         </table>
-                    </div>
+                    ` : '<div class="text-muted" style="text-align: center; padding: 20px;">暂无交易记录，点击上方按钮添加</div>'}
                 </div>
-            `;
-        }
+            </div>
+        `;
 
         html += `<div style="margin-top: 16px; font-size: 12px; color: var(--text-muted);">* 数据来源于免费接口（AKShare/天天基金），部分指标可能需要时间计算</div>`;
 
@@ -1490,6 +2171,36 @@ async function deletePosition(id) {
     }
 }
 
+// 持仓排序
+function sortPositions(sortBy) {
+    // 如果点击的是当前排序字段，切换排序方向
+    if (positionsSortBy === sortBy) {
+        positionsSortOrder = positionsSortOrder === 'asc' ? 'desc' : 'asc';
+    } else {
+        // 切换排序字段，默认降序
+        positionsSortBy = sortBy;
+        positionsSortOrder = 'desc';
+    }
+
+    // 重新加载持仓列表
+    pageManager.loadPositions(pageManager.currentAccountId);
+}
+
+// 持仓管理页面排序
+function sortPositionsFull(sortBy) {
+    // 如果点击的是当前排序字段，切换排序方向
+    if (positionsSortBy === sortBy) {
+        positionsSortOrder = positionsSortOrder === 'asc' ? 'desc' : 'asc';
+    } else {
+        // 切换排序字段，默认降序
+        positionsSortBy = sortBy;
+        positionsSortOrder = 'desc';
+    }
+
+    // 重新加载持仓管理页面
+    positionsPage.load(pageManager.currentAccountId);
+}
+
 // 显示交易模态框
 function showTradeModal() {
     const today = new Date().toISOString().split('T')[0];
@@ -1542,6 +2253,231 @@ function showTradeModal() {
     }, 100);
 }
 
+// 快捷交易弹窗（从持仓详情发起）
+let currentQuickTradePositionId = null;
+let currentQuickTradeAssetType = null;
+let currentQuickTradeQuantity = null;
+
+function showQuickTradeModal(positionId, symbol, name, tradeType, price, assetType, quantity) {
+    currentQuickTradePositionId = positionId;
+    currentQuickTradeAssetType = assetType || 'stock';
+    currentQuickTradeQuantity = quantity || 0;
+
+    const today = new Date().toISOString().split('T')[0];
+    const displayPrice = price ? price.toFixed(3) : '';
+
+    // 判断是否只能整数
+    const isIntegerOnly = ['stock', 'etf_index', 'etf_sector'].includes(currentQuickTradeAssetType);
+    const stepAttr = isIntegerOnly ? 'step="1" min="1"' : 'step="0.01" min="0.01"';
+    const placeholderText = isIntegerOnly ? '输入股数（整数）' : '输入份额（可小数）';
+
+    // 卖出时显示快捷比例按钮
+    let quickRatioButtons = '';
+    if (tradeType === 'sell' && currentQuickTradeQuantity > 0) {
+        quickRatioButtons = `
+            <div class="quick-ratio-buttons" style="margin-bottom: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
+                <button type="button" class="btn btn-sm btn-outline" onclick="applySellRatio(0.25)">1/4</button>
+                <button type="button" class="btn btn-sm btn-outline" onclick="applySellRatio(0.333)">1/3</button>
+                <button type="button" class="btn btn-sm btn-outline" onclick="applySellRatio(0.5)">1/2</button>
+                <button type="button" class="btn btn-sm btn-outline" onclick="applySellRatio(1)">全仓</button>
+            </div>
+        `;
+    }
+
+    const content = `
+        <form id="quick-trade-form">
+            <div class="form-grid">
+                <div class="form-group">
+                    <label>标的代码</label>
+                    <input type="text" name="symbol" class="form-input" value="${symbol}" readonly style="background: #f5f5f5;">
+                </div>
+                <div class="form-group">
+                    <label>标的名称</label>
+                    <input type="text" class="form-input" value="${name}" readonly style="background: #f5f5f5;">
+                </div>
+            </div>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label>交易类型</label>
+                    <select name="trade_type" class="form-input" required onchange="toggleQuickRatioButtons(this.value)">
+                        <option value="buy" ${tradeType === 'buy' ? 'selected' : ''}>买入</option>
+                        <option value="sell" ${tradeType === 'sell' ? 'selected' : ''}>卖出</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>数量</label>
+                    ${quickRatioButtons}
+                    <input type="number" name="quantity" id="quick-trade-quantity" class="form-input"
+                           required ${stepAttr} placeholder="${placeholderText}">
+                    <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">
+                        当前持仓: ${currentQuickTradeQuantity} ${isIntegerOnly ? '股' : '份'}
+                    </div>
+                </div>
+            </div>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label>价格</label>
+                    <input type="number" name="price" class="form-input" required step="0.0001" value="${displayPrice}" placeholder="输入价格">
+                </div>
+                <div class="form-group">
+                    <label>交易日期</label>
+                    <input type="text" name="trade_date" id="quick-trade-date-picker" class="form-input" required value="${today}">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>交易理由</label>
+                <input type="text" name="reason" class="form-input" placeholder="如：低估加仓、止盈卖出">
+                <input type="hidden" name="signal_type" id="quick-trade-signal-type">
+                <input type="hidden" name="asset_type" value="${currentQuickTradeAssetType}">
+            </div>
+        </form>
+    `;
+    const footer = `
+        <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveQuickTrade()">确认交易</button>
+    `;
+    modalManager.show('快捷交易', content, footer);
+
+    // 初始化日期选择器
+    setTimeout(() => {
+        DatePicker.init('#quick-trade-date-picker', { defaultDate: today });
+    }, 100);
+}
+
+// 应用卖出比例
+function applySellRatio(ratio) {
+    const quantityInput = document.getElementById('quick-trade-quantity');
+    const signalTypeInput = document.getElementById('quick-trade-signal-type');
+    const isIntegerOnly = ['stock', 'etf_index', 'etf_sector'].includes(currentQuickTradeAssetType);
+
+    let sellQty = currentQuickTradeQuantity * ratio;
+
+    if (isIntegerOnly) {
+        sellQty = Math.floor(sellQty);
+        if (sellQty < 1) sellQty = 1;
+    } else {
+        // 基金：保留两位小数
+        sellQty = Math.floor(sellQty * 100) / 100;
+        if (sellQty < 0.01) sellQty = currentQuickTradeQuantity; // 小数份额最小卖全部
+    }
+
+    quantityInput.value = sellQty;
+
+    // 设置信号类型（用于后端更新止盈状态）
+    if (ratio <= 0.35) {
+        signalTypeInput.value = 'stop_profit_1';
+    } else if (ratio <= 0.55) {
+        signalTypeInput.value = 'stop_profit_2';
+    } else if (ratio >= 0.9) {
+        signalTypeInput.value = 'stop_profit_3';
+    }
+}
+
+// 切换交易类型时显示/隐藏快捷按钮
+function toggleQuickRatioButtons(tradeType) {
+    const buttonsContainer = document.querySelector('.quick-ratio-buttons');
+    if (buttonsContainer) {
+        buttonsContainer.style.display = tradeType === 'sell' ? 'flex' : 'none';
+    }
+    // 清空数量输入
+    const quantityInput = document.getElementById('quick-trade-quantity');
+    if (quantityInput) {
+        quantityInput.value = '';
+    }
+    // 清空信号类型
+    const signalTypeInput = document.getElementById('quick-trade-signal-type');
+    if (signalTypeInput) {
+        signalTypeInput.value = '';
+    }
+}
+
+// 从信号列表快捷操作（使用建议的份额/金额）
+function applySuggestion(positionId, symbol, name, currentPrice, suggestionQuantity, assetType, tradeType) {
+    // 打开快捷交易弹窗，并自动填充建议的数量
+    showQuickTradeModal(positionId, symbol, name, tradeType, currentPrice, assetType, 0);
+
+    // 延迟填充建议数量（等待弹窗创建）
+    setTimeout(() => {
+        const quantityInput = document.getElementById('quick-trade-quantity');
+        if (quantityInput) {
+            // 根据资产类型决定数量精度
+            const isIntegerOnly = ['stock', 'etf_index', 'etf_sector'].includes(assetType);
+            if (isIntegerOnly) {
+                quantityInput.value = Math.floor(suggestionQuantity);
+            } else {
+                // 基金允许小数，保留两位
+                quantityInput.value = Math.floor(suggestionQuantity * 100) / 100;
+            }
+        }
+        // 设置信号类型
+        const signalTypeInput = document.getElementById('quick-trade-signal-type');
+        if (signalTypeInput) {
+            if (tradeType === 'sell') {
+                signalTypeInput.value = 'stop_profit_signal';
+            } else {
+                signalTypeInput.value = 'add_position_signal';
+            }
+        }
+    }, 150);
+}
+
+// 保存快捷交易
+async function saveQuickTrade() {
+    const form = document.getElementById('quick-trade-form');
+    const formData = new FormData(form);
+    const data = Object.fromEntries(formData.entries());
+
+    // 根据资产类型决定数量解析方式
+    const isIntegerOnly = ['stock', 'etf_index', 'etf_sector'].includes(currentQuickTradeAssetType);
+
+    if (isIntegerOnly) {
+        data.quantity = parseInt(data.quantity);
+    } else {
+        // 基金等允许小数份额，保留两位小数
+        data.quantity = parseFloat(data.quantity);
+        data.quantity = Math.floor(data.quantity * 100) / 100;
+    }
+
+    data.price = parseFloat(data.price);
+
+    if (!data.quantity || data.quantity <= 0) {
+        utils.showToast('请输入有效的数量', 'error');
+        return;
+    }
+    if (!data.price || data.price <= 0) {
+        utils.showToast('请输入有效的价格', 'error');
+        return;
+    }
+
+    // 获取信号类型（如果有）
+    const signalTypeInput = document.getElementById('quick-trade-signal-type');
+    if (signalTypeInput && signalTypeInput.value) {
+        data.signal_type = signalTypeInput.value;
+    }
+
+    // 传入资产类型（用于后端判断）
+    data.asset_type = currentQuickTradeAssetType;
+
+    try {
+        await utils.request(`${API_BASE}/trades`, {
+            method: 'POST',
+            body: JSON.stringify(data)
+        });
+        utils.showToast('交易记录创建成功');
+        closeModal();
+
+        // 刷新持仓详情页面
+        if (currentQuickTradePositionId) {
+            showPositionDetail(currentQuickTradePositionId);
+        }
+
+        // 同时刷新列表页数据
+        pageManager.loadPageData(pageManager.currentPage);
+    } catch (error) {
+        utils.showToast(error.message, 'error');
+    }
+}
+
 // 保存交易
 async function saveTrade() {
     const form = document.getElementById('trade-form');
@@ -1559,6 +2495,12 @@ async function saveTrade() {
         utils.showToast('交易记录创建成功');
         closeModal();
         pageManager.loadPageData(pageManager.currentPage);
+
+        // 如果持仓详情弹窗打开，刷新它
+        const detailModal = document.getElementById('position-detail-modal');
+        if (detailModal && detailModal.style.display === 'flex' && currentQuickTradePositionId) {
+            showPositionDetail(currentQuickTradePositionId);
+        }
     } catch (error) {
         utils.showToast(error.message, 'error');
     }
@@ -1664,6 +2606,10 @@ async function runBacktest() {
     const startDate = document.getElementById('backtest-start-date').value;
     const endDate = document.getElementById('backtest-end-date').value;
 
+    // 获取资产类型
+    const assetTypeRadio = document.querySelector('input[name="backtest-asset-type"]:checked');
+    const assetType = assetTypeRadio ? assetTypeRadio.value : 'stock';
+
     // 获取选中的策略
     const strategies = backtestPage.getSelectedStrategies();
     if (strategies.length === 0) {
@@ -1681,7 +2627,8 @@ async function runBacktest() {
 
     const data = {
         symbol: symbol,
-        data_source: dataSource,
+        data_source: assetType === 'fund' ? 'eastmoney' : dataSource,
+        asset_type: assetType,
         initial_capital: initialCapital,
         start_date: startDate,
         end_date: endDate,
@@ -1710,7 +2657,8 @@ function renderBacktestResult(result) {
             <h4>回测结果</h4>
             <div style="font-size: 12px; color: var(--text-muted);">
                 标的: ${result.symbol} |
-                数据源: ${result.data_source === 'tushare' ? 'Tushare' : '本地数据'} |
+                类型: ${result.asset_type === 'fund' ? '基金' : '股票/ETF'} |
+                数据源: ${result.data_source === 'tushare' ? 'Tushare' : result.data_source === 'eastmoney' ? '天天基金' : '本地数据'} |
                 数据量: ${result.data_count} 条 |
                 时间范围: ${result.start_date} ~ ${result.end_date}
             </div>
@@ -1765,11 +2713,10 @@ function renderBacktestResult(result) {
         html += `
             <div class="accordion-item">
                 <div class="accordion-header" onclick="toggleAccordion(${index})">
-                    <span>${s.strategy_name} - 详细记录</span>
+                    <span>${s.strategy_name} - ${s.summary}</span>
                     <span>▼</span>
                 </div>
                 <div class="accordion-content" id="accordion-${index}" style="display: none;">
-                    <div style="margin-bottom: 8px;"><strong>策略总结:</strong> ${s.summary}</div>
                     ${s.records && s.records.length > 0 ? `
                         <table class="data-table">
                             <thead>
@@ -1784,17 +2731,30 @@ function renderBacktestResult(result) {
                                 </tr>
                             </thead>
                             <tbody>
-                                ${s.records.map(r => `
+                                ${s.records.map(r => {
+                                    let actionText = r.action;
+                                    let actionClass = '';
+                                    if (r.action === '买入' || r.action.includes('加仓')) {
+                                        actionText = r.action;
+                                        actionClass = 'success';
+                                    } else if (r.action === '卖出' || r.action === '清仓' || r.action.includes('止盈')) {
+                                        actionText = r.action;
+                                        actionClass = 'danger';
+                                    } else {
+                                        actionText = '持有';
+                                        actionClass = '';
+                                    }
+                                    return `
                                     <tr>
                                         <td>${r.date}</td>
                                         <td>${r.price.toFixed(3)}</td>
-                                        <td><span class="tag ${r.action === 'buy' ? 'success' : 'danger'}">${r.action === 'buy' ? '买入' : '卖出'}</span></td>
+                                        <td>${actionClass ? `<span class="tag ${actionClass}">${actionText}</span>` : actionText}</td>
                                         <td>${r.shares}</td>
                                         <td>${utils.formatMoney(r.amount)}</td>
                                         <td>${utils.formatMoney(r.total_value)}</td>
                                         <td class="${r.profit_rate >= 0 ? 'profit' : 'loss'}">${r.profit_rate.toFixed(2)}%</td>
                                     </tr>
-                                `).join('')}
+                                `}).join('')}
                             </tbody>
                         </table>
                     ` : '<div class="text-muted">暂无交易记录</div>'}
@@ -1812,6 +2772,101 @@ function toggleAccordion(index) {
     const content = document.getElementById(`accordion-${index}`);
     if (content) {
         content.style.display = content.style.display === 'none' ? 'block' : 'none';
+    }
+}
+
+// 切换回测结果/历史Tab
+function switchBacktestTab(tab) {
+    const resultContainer = document.getElementById('backtest-result-container');
+    const historyContainer = document.getElementById('backtest-history-container');
+    const resultBtn = document.getElementById('bt-tab-result');
+    const historyBtn = document.getElementById('bt-tab-history');
+
+    if (tab === 'result') {
+        resultContainer.style.display = 'block';
+        historyContainer.style.display = 'none';
+        resultBtn.classList.add('active');
+        historyBtn.classList.remove('active');
+    } else {
+        resultContainer.style.display = 'none';
+        historyContainer.style.display = 'block';
+        resultBtn.classList.remove('active');
+        historyBtn.classList.add('active');
+        loadBacktestHistory();
+    }
+}
+
+// 加载回测历史列表
+async function loadBacktestHistory() {
+    const container = document.getElementById('backtest-history-list');
+
+    try {
+        const history = await utils.request(`${API_BASE}/backtest/history`);
+
+        if (!history || history.length === 0) {
+            container.innerHTML = '<div class="text-muted" style="text-align: center; padding: 20px;">暂无历史记录</div>';
+            return;
+        }
+
+        let html = '<table class="data-table"><thead><tr><th>时间</th><th>标的</th><th>时间范围</th><th>最佳策略</th><th>最佳收益</th><th>操作</th></tr></thead><tbody>';
+        history.forEach(h => {
+            const returnDisplay = h.best_return ? `<span class="${h.best_return >= 0 ? 'profit' : 'loss'}">${h.best_return.toFixed(2)}%</span>` : '--';
+            html += `
+                <tr>
+                    <td>${utils.formatDate(h.created_at)}</td>
+                    <td>${h.symbol} ${h.name ? `(${h.name})` : ''}</td>
+                    <td>${h.start_date} ~ ${h.end_date}</td>
+                    <td>${h.best_strategy || '--'}</td>
+                    <td>${returnDisplay}</td>
+                    <td>
+                        <button class="btn btn-sm btn-secondary" onclick="viewBacktestHistory(${h.id})">查看</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteBacktestHistory(${h.id})" style="margin-left: 4px;">删除</button>
+                    </td>
+                </tr>
+            `;
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (error) {
+        container.innerHTML = '<div class="text-muted" style="text-align: center; padding: 20px;">加载历史记录失败</div>';
+    }
+}
+
+// 查看回测历史详情
+async function viewBacktestHistory(historyId) {
+    // 切换到结果Tab
+    switchBacktestTab('result');
+
+    const container = document.getElementById('backtest-result');
+    container.innerHTML = '<div class="loading">加载历史详情...</div>';
+
+    try {
+        const result = await utils.request(`${API_BASE}/backtest/history/${historyId}`);
+
+        if (result.results) {
+            renderBacktestResult(result.results);
+        } else {
+            container.innerHTML = '<div class="text-muted">暂无详细数据</div>';
+        }
+    } catch (error) {
+        container.innerHTML = `<div class="text-muted" style="color: var(--danger-color);">${error.message}</div>`;
+    }
+}
+
+// 删除回测历史
+async function deleteBacktestHistory(historyId) {
+    if (!confirm('确定要删除这条回测历史吗？')) {
+        return;
+    }
+
+    try {
+        await utils.request(`${API_BASE}/backtest/history/${historyId}`, {
+            method: 'DELETE'
+        });
+        utils.showToast('删除成功');
+        await loadBacktestHistory();
+    } catch (error) {
+        utils.showToast(error.message, 'error');
     }
 }
 
@@ -1884,6 +2939,115 @@ async function compareBacktest() {
     }
 }
 
+// 切换资产类型（股票/基金）
+function toggleAssetType() {
+    const assetTypeRadio = document.querySelector('input[name="backtest-asset-type"]:checked');
+    const assetType = assetTypeRadio ? assetTypeRadio.value : 'stock';
+    const datasourceSection = document.getElementById('stock-datasource-section');
+    const symbolLabel = document.getElementById('symbol-label');
+    const nameLabel = document.getElementById('name-label');
+    const symbolInput = document.getElementById('backtest-stock-symbol');
+    const nameInput = document.getElementById('backtest-stock-name');
+    const quickSelectLabel = document.getElementById('quick-select-label');
+
+    if (assetType === 'fund') {
+        // 基金模式：隐藏数据源选择，使用天天基金
+        datasourceSection.style.display = 'none';
+        symbolLabel.textContent = '基金代码';
+        nameLabel.textContent = '基金名称';
+        symbolInput.placeholder = '如: 000001';
+        nameInput.placeholder = '如: 华夏成长混合';
+        if (quickSelectLabel) quickSelectLabel.textContent = '快速选择基金';
+    } else {
+        // 股票模式：显示数据源选择
+        datasourceSection.style.display = 'block';
+        symbolLabel.textContent = '股票代码';
+        nameLabel.textContent = '股票名称';
+        symbolInput.placeholder = '如: 601168';
+        nameInput.placeholder = '如: 西部矿业';
+        if (quickSelectLabel) quickSelectLabel.textContent = '快速选择股票';
+    }
+
+    // 更新快速选择列表
+    loadQuickSelectSymbols();
+
+    // 清空当前选择
+    clearQuickSelect();
+}
+
+// 快速选择列表数据缓存
+let quickSelectData = { stocks: [], funds: [] };
+
+// 加载快速选择列表
+async function loadQuickSelectSymbols() {
+    try {
+        const result = await utils.request(`${API_BASE}/backtest/quick-select-symbols`);
+        if (result) {
+            quickSelectData.stocks = result.stocks || [];
+            quickSelectData.funds = result.funds || [];
+            updateQuickSelectDropdown();
+        }
+    } catch (error) {
+        console.error('加载快速选择列表失败:', error);
+    }
+}
+
+// 更新快速选择下拉框
+function updateQuickSelectDropdown() {
+    const assetTypeRadio = document.querySelector('input[name="backtest-asset-type"]:checked');
+    const assetType = assetTypeRadio ? assetTypeRadio.value : 'stock';
+    const select = document.getElementById('quick-select-symbol');
+
+    if (!select) return;
+
+    const items = assetType === 'fund' ? quickSelectData.funds : quickSelectData.stocks;
+
+    let html = '<option value="">-- 从已有数据中选择或手动输入 --</option>';
+    items.forEach(item => {
+        const displayText = item.name ? `${item.symbol} - ${item.name}` : item.symbol;
+        html += `<option value="${item.symbol}" data-name="${item.name || ''}">${displayText}</option>`;
+    });
+
+    select.innerHTML = html;
+}
+
+// 快速选择变化时
+function onQuickSelectChange() {
+    const select = document.getElementById('quick-select-symbol');
+    const symbolInput = document.getElementById('backtest-stock-symbol');
+    const nameInput = document.getElementById('backtest-stock-name');
+
+    if (select.value) {
+        symbolInput.value = select.value;
+        const selectedOption = select.options[select.selectedIndex];
+        const name = selectedOption.getAttribute('data-name');
+        if (name) {
+            nameInput.value = name;
+        }
+    }
+}
+
+// 手动输入代码时清空快速选择
+function onSymbolInput() {
+    const select = document.getElementById('quick-select-symbol');
+    const symbolInput = document.getElementById('backtest-stock-symbol');
+
+    if (select.value !== symbolInput.value) {
+        select.value = '';
+    }
+}
+
+// 清空选择
+function clearQuickSelect() {
+    const select = document.getElementById('quick-select-symbol');
+    const symbolInput = document.getElementById('backtest-stock-symbol');
+    const nameInput = document.getElementById('backtest-stock-name');
+
+    if (select) select.value = '';
+    if (symbolInput) symbolInput.value = '';
+    if (nameInput) nameInput.value = '';
+}
+
 // 切换数据源选项
 function toggleDataSourceOptions() {
     const dataSource = document.getElementById('backtest-data-source').value;
@@ -1923,9 +3087,10 @@ async function updateLocalSymbolSelect() {
     try {
         const histories = await utils.request(`${API_BASE}/backtest/price-histories`);
         if (histories && histories.length > 0) {
-            select.innerHTML = histories.map(h =>
-                `<option value="${h.symbol}">${h.symbol} - ${h.name || ''} (${h.count}条)</option>`
-            ).join('');
+            select.innerHTML = histories.map(h => {
+                const displayText = h.name ? `${h.symbol} - ${h.name}` : h.symbol;
+                return `<option value="${h.symbol}">${displayText} (${h.count}条)</option>`;
+            }).join('');
         } else {
             select.innerHTML = '<option value="">请先导入数据</option>';
         }
@@ -1943,8 +3108,12 @@ async function fetchOnlineData() {
     const endDate = document.getElementById('backtest-fetch-end').value;
     const resultDiv = document.getElementById('fetch-result');
 
+    // 获取资产类型
+    const assetTypeRadio = document.querySelector('input[name="backtest-asset-type"]:checked');
+    const assetType = assetTypeRadio ? assetTypeRadio.value : 'stock';
+
     if (!symbol) {
-        utils.showToast('请输入股票代码', 'error');
+        utils.showToast(assetType === 'fund' ? '请输入基金代码' : '请输入股票代码', 'error');
         return;
     }
 
@@ -1954,7 +3123,8 @@ async function fetchOnlineData() {
         const data = {
             symbol: symbol,
             name: name || symbol,
-            data_source: dataSource,
+            data_source: assetType === 'fund' ? 'eastmoney' : dataSource,
+            asset_type: assetType,
             start_date: startDate,
             end_date: endDate
         };
@@ -1968,7 +3138,7 @@ async function fetchOnlineData() {
             resultDiv.innerHTML = `
                 <div class="alert alert-success">
                     <strong>获取成功!</strong>
-                    获取到 ${result.count} 条数据，已保存到数据库
+                    获取到 ${result.count} 条${result.asset_type === 'fund' ? '基金净值' : '股票'}数据，已保存到数据库
                     <br><small>时间范围: ${result.start_date} ~ ${result.end_date}</small>
                 </div>
             `;
@@ -1976,6 +3146,8 @@ async function fetchOnlineData() {
             // 刷新已导入数据列表和标的下拉框
             await loadImportedDataList();
             await updateLocalSymbolSelect();
+            // 刷新快速选择列表
+            await loadQuickSelectSymbols();
 
             // 自动选择刚获取的标的
             const symbolSelect = document.getElementById('backtest-symbol');
@@ -2023,42 +3195,6 @@ function setTushareDateRange(range, btn) {
 
     document.getElementById('tushare-start-date').value = startDate.toISOString().split('T')[0];
     document.getElementById('tushare-end-date').value = today.toISOString().split('T')[0];
-}
-
-// 设置回测日期范围
-function setBacktestDateRange(range, btn) {
-    // 更新按钮状态
-    const buttons = document.querySelectorAll('#page-backtest .time-range-selector .time-btn');
-    buttons.forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-
-    const today = new Date();
-    let startDate = new Date();
-
-    switch (range) {
-        case '1m':
-            startDate.setMonth(today.getMonth() - 1);
-            break;
-        case '3m':
-            startDate.setMonth(today.getMonth() - 3);
-            break;
-        case '6m':
-            startDate.setMonth(today.getMonth() - 6);
-            break;
-        case '1y':
-            startDate.setFullYear(today.getFullYear() - 1);
-            break;
-        case '2y':
-            startDate.setFullYear(today.getFullYear() - 2);
-            break;
-        case 'all':
-            // 全部 - 设置为很早的日期
-            startDate.setFullYear(2000);
-            break;
-    }
-
-    document.getElementById('backtest-start-date').value = startDate.toISOString().split('T')[0];
-    document.getElementById('backtest-end-date').value = today.toISOString().split('T')[0];
 }
 
 // 从Tushare获取数据
@@ -2183,17 +3319,19 @@ async function loadImportedDataList() {
 
         if (!histories || histories.length === 0) {
             container.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 20px;">暂无导入数据</div>';
-            select.innerHTML = '<option value="">请先导入数据</option>';
+            select.innerHTML = '<option value="">请先获取数据</option>';
             return;
         }
 
         // 更新表格
-        let html = '<table class="data-table"><thead><tr><th>代码</th><th>名称</th><th>数据条数</th><th>开始日期</th><th>结束日期</th><th>操作</th></tr></thead><tbody>';
+        let html = '<table class="data-table"><thead><tr><th>代码</th><th>名称</th><th>类型</th><th>数据条数</th><th>开始日期</th><th>结束日期</th><th>操作</th></tr></thead><tbody>';
         histories.forEach(h => {
+            const typeLabel = h.asset_type === 'fund' ? '基金' : '股票';
             html += `
                 <tr>
                     <td>${h.symbol}</td>
                     <td>${h.name || '--'}</td>
+                    <td>${typeLabel}</td>
                     <td>${h.count}</td>
                     <td>${h.start_date || '--'}</td>
                     <td>${h.end_date || '--'}</td>
@@ -2204,8 +3342,11 @@ async function loadImportedDataList() {
         html += '</tbody></table>';
         container.innerHTML = html;
 
-        // 更新下拉框
-        select.innerHTML = histories.map(h => `<option value="${h.symbol}">${h.symbol} - ${h.name || ''}</option>`).join('');
+        // 更新下拉框 - 显示代码和名称
+        select.innerHTML = histories.map(h => {
+            const displayText = h.name ? `${h.symbol} - ${h.name}` : h.symbol;
+            return `<option value="${h.symbol}">${displayText} (${h.count}条)</option>`;
+        }).join('');
     } catch (error) {
         console.error('加载数据列表失败:', error);
     }
@@ -2223,20 +3364,44 @@ async function deletePriceHistory(symbol) {
         });
         utils.showToast('删除成功');
         await loadImportedDataList();
+        await loadQuickSelectSymbols();
     } catch (error) {
         utils.showToast('删除失败', 'error');
     }
 }
 
 // AI 分析
+let aiTaskId = null;
+let aiPollInterval = null;
+
+// 维度名称映射
+const dimNames = {
+    'market': { name: '市场分析', icon: '📊' },
+    'fundamentals': { name: '基本面分析', icon: '💰' },
+    'technical': { name: '技术分析', icon: '📈' },
+    'capital_flow': { name: '资金面分析', icon: '💵' },
+    'sector': { name: '板块分析', icon: '🏭' },
+    'trader_plan': { name: '交易员计划', icon: '💼' },
+    'market_overview': { name: '大盘分析', icon: '📊' },
+    'news': { name: '新闻分析', icon: '📰' },
+    'bull_view': { name: '多头观点', icon: '🐂' },
+    'bear_view': { name: '空头观点', icon: '🐻' },
+    'verdict': { name: '综合裁决', icon: '⚖️' },
+    'aggressive': { name: '激进策略', icon: '⚡' },
+    'conservative': { name: '保守策略', icon: '🛡️' },
+    'neutral': { name: '中性策略', icon: '⚖️' },
+    'investment_advice': { name: '投资建议', icon: '📋' },
+    'suggestion': { name: '综合建议', icon: '📋' }
+};
+
 async function runAIAnalysis() {
     const container = document.getElementById('ai-result');
     const tabsContainer = document.getElementById('ai-result-tabs');
-    const tabsHeader = document.getElementById('ai-tabs-header');
-    const tabsContent = document.getElementById('ai-tabs-content');
+    const progressContainer = document.getElementById('ai-progress-container');
 
-    container.innerHTML = '<div class="loading">分析中，请稍候...</div>';
+    // 隐藏之前的结果
     tabsContainer.style.display = 'none';
+    container.innerHTML = '';
 
     // 获取分析类型
     const analysisType = document.querySelector('input[name="ai-analysis-type"]:checked')?.value || 'single';
@@ -2246,7 +3411,6 @@ async function runAIAnalysis() {
 
     if (dimensions.length === 0) {
         utils.showToast('请选择至少一个分析维度', 'error');
-        container.innerHTML = '';
         return;
     }
 
@@ -2260,108 +3424,297 @@ async function runAIAnalysis() {
         const positionId = document.getElementById('ai-position-select').value;
         if (!positionId) {
             utils.showToast('请选择要分析的标的', 'error');
-            container.innerHTML = '';
             return;
         }
         data.position_id = parseInt(positionId);
     }
 
     try {
-        const result = await utils.request(`${API_BASE}/ai/analyze`, {
+        // 先同步最新价格
+        showAIProgress('正在同步最新价格数据...', 0, dimensions);
+        progressContainer.style.display = 'block';
+        document.getElementById('ai-cancel-btn').style.display = 'none';
+
+        try {
+            const syncResult = await utils.request(`${API_BASE}/sync-prices`, {
+                method: 'POST'
+            });
+            console.log('价格同步结果:', syncResult);
+        } catch (syncError) {
+            console.warn('价格同步失败，使用缓存数据:', syncError);
+        }
+
+        // 启动异步分析任务
+        showAIProgress('正在启动分析任务...', 0, dimensions);
+
+        const taskResult = await utils.request(`${API_BASE}/ai/analyze/start`, {
             method: 'POST',
             body: JSON.stringify(data)
         });
 
-        // 维度名称映射（扩展后）
-        const dimNames = {
-            'market': { name: '市场分析', icon: '📊' },
-            'fundamentals': { name: '基本面分析', icon: '💰' },
-            'technical': { name: '技术分析', icon: '📈' },
-            'capital_flow': { name: '资金面分析', icon: '💵' },
-            'sector': { name: '板块分析', icon: '🏭' },
-            'trader_plan': { name: '交易员计划', icon: '💼' },
-            'market_overview': { name: '大盘分析', icon: '📊' },
-            'news': { name: '新闻分析', icon: '📰' },
-            'bull_view': { name: '多头观点', icon: '🐂' },
-            'bear_view': { name: '空头观点', icon: '🐻' },
-            'verdict': { name: '综合裁决', icon: '⚖️' },
-            'aggressive': { name: '激进策略', icon: '⚡' },
-            'conservative': { name: '保守策略', icon: '🛡️' },
-            'neutral': { name: '中性策略', icon: '⚖️' },
-            'investment_advice': { name: '投资建议', icon: '📋' },
-            'suggestion': { name: '综合建议', icon: '📋' }
-        };
+        aiTaskId = taskResult.task_id;
+        document.getElementById('ai-cancel-btn').style.display = 'inline-block';
 
-        // 渲染分析结果
-        if (result.dimensions && Object.keys(result.dimensions).length > 1) {
-            // 多维度分析结果 - 使用Tab切换
-            container.innerHTML = '';
-            tabsContainer.style.display = 'block';
+        // 开始轮询进度
+        startAIPolling(aiTaskId, dimensions);
 
-            // 生成Tab头部
-            let headerHtml = '';
-            let contentHtml = '';
-            const dimKeys = Object.keys(result.dimensions);
-            dimKeys.forEach((dim, index) => {
-                const dimInfo = dimNames[dim] || { name: dim, icon: '📄' };
-                const content = result.dimensions[dim];
-                const score = content.score ? `<span class="tag ${content.score >= 6 ? 'success' : content.score >= 4 ? 'warning' : 'danger'}">${content.score}分</span>` : '';
+    } catch (error) {
+        progressContainer.style.display = 'none';
+        container.innerHTML = `<div class="text-muted" style="color: var(--danger-color);">${error.message}</div>`;
+        tabsContainer.style.display = 'none';
+    }
+}
 
-                headerHtml += `<button class="ai-tab-btn ${index === 0 ? 'active' : ''}" onclick="switchAITab('${dim}')">${dimInfo.icon} ${dimInfo.name} ${score}</button>`;
+function showAIProgress(currentText, progress, dimensions) {
+    const progressContainer = document.getElementById('ai-progress-container');
+    const progressFill = document.getElementById('ai-progress-fill');
+    const progressPercent = document.getElementById('ai-progress-percent');
+    const progressCurrent = document.getElementById('ai-progress-current');
+    const dimensionsStatus = document.getElementById('ai-dimensions-status');
 
-                const analysisText = content.analysis || content;
-                contentHtml += `
-                    <div class="ai-tab-panel ${index === 0 ? 'active' : ''}" id="tab-panel-${dim}">
-                        <div class="ai-dimension-result">
-                            ${score ? `<div style="margin-bottom: 12px;"><span style="font-weight: 600;">评分：</span>${score}</div>` : ''}
-                            <div class="analysis-content">${typeof marked !== 'undefined' ? marked.parse(analysisText) : analysisText}</div>
-                        </div>
-                    </div>
-                `;
-            });
+    progressContainer.style.display = 'block';
+    progressFill.style.width = `${progress}%`;
+    progressPercent.textContent = `${progress}%`;
+    progressCurrent.textContent = currentText;
 
-            tabsHeader.innerHTML = headerHtml;
-            tabsContent.innerHTML = contentHtml;
+    // 显示维度状态列表
+    let statusHtml = '';
+    dimensions.forEach(dim => {
+        const dimInfo = dimNames[dim] || { name: dim, icon: '📄' };
+        statusHtml += `<span class="ai-dimension-status pending" id="dim-status-${dim}">${dimInfo.icon} ${dimInfo.name} ⏳</span>`;
+    });
+    dimensionsStatus.innerHTML = statusHtml;
+}
 
-            // 综合评分显示
-            if (result.overall_score) {
-                const scoreClass = result.overall_score >= 6 ? 'success' : result.overall_score >= 4 ? 'warning' : 'danger';
-                container.innerHTML = `
-                    <div class="signal-item" style="margin-bottom: 16px; background: rgba(74, 144, 226, 0.1); padding: 12px; border-radius: 8px;">
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <span style="font-weight: 600;">🎯 综合评分</span>
-                            <span class="tag ${scoreClass}" style="font-size: 18px; padding: 6px 16px;">${result.overall_score}/10</span>
-                        </div>
-                    </div>
-                `;
+function startAIPolling(taskId, dimensions) {
+    // 清除之前的轮询
+    if (aiPollInterval) {
+        clearInterval(aiPollInterval);
+    }
+
+    // 每2秒轮询一次
+    aiPollInterval = setInterval(async () => {
+        try {
+            const status = await utils.request(`${API_BASE}/ai/analyze/status/${taskId}`);
+
+            updateAIPProgressUI(status, dimensions);
+
+            if (status.status === 'completed') {
+                clearInterval(aiPollInterval);
+                aiPollInterval = null;
+                document.getElementById('ai-cancel-btn').style.display = 'none';
+                await loadAIResult(taskId);
+            } else if (status.status === 'failed' || status.status === 'cancelled') {
+                clearInterval(aiPollInterval);
+                aiPollInterval = null;
+                document.getElementById('ai-cancel-btn').style.display = 'none';
+                document.getElementById('ai-result').innerHTML = `<div class="text-muted" style="color: var(--danger-color);">${status.error_message || '分析失败'}</div>`;
             }
-        } else if (result.dimensions && Object.keys(result.dimensions).length === 1) {
-            // 单维度分析结果
-            tabsContainer.style.display = 'none';
-            const dim = Object.keys(result.dimensions)[0];
-            const content = result.dimensions[dim];
-            const dimInfo = dimNames[dim] || { name: dim, icon: '📄' };
-            const score = content.score ? `<span class="tag ${content.score >= 6 ? 'success' : content.score >= 4 ? 'warning' : 'danger'}">${content.score}分</span>` : '';
-
-            container.innerHTML = `
-                <div class="ai-dimension-result">
-                    <h4>${dimInfo.icon} ${dimInfo.name} ${score}</h4>
-                    <div class="analysis-content">${typeof marked !== 'undefined' ? marked.parse(content.analysis || content) : content.analysis || content}</div>
-                </div>
-            `;
-        } else if (result.analysis) {
-            // 全仓分析结果
-            tabsContainer.style.display = 'none';
-            container.innerHTML = `<div class="ai-analysis-content">${typeof marked !== 'undefined' ? marked.parse(result.analysis) : result.analysis}</div>`;
-        } else {
-            container.innerHTML = '<div class="text-muted">暂无分析结果</div>';
+        } catch (error) {
+            console.error('轮询进度失败:', error);
         }
+    }, 2000);
+}
+
+function updateAIPProgressUI(status, dimensions) {
+    const progressFill = document.getElementById('ai-progress-fill');
+    const progressPercent = document.getElementById('ai-progress-percent');
+    const progressCurrent = document.getElementById('ai-progress-current');
+
+    const percentage = status.progress_percentage || 0;
+    progressFill.style.width = `${percentage}%`;
+    progressPercent.textContent = `${percentage}%`;
+
+    if (status.current_dimension) {
+        const dimInfo = dimNames[status.current_dimension] || { name: status.current_dimension, icon: '📄' };
+        progressCurrent.textContent = `正在分析: ${dimInfo.icon} ${dimInfo.name}`;
+    }
+
+    // 更新各维度状态
+    if (status.dimensions_status) {
+        for (const [dim, dimStatus] of Object.entries(status.dimensions_status)) {
+            const statusEl = document.getElementById(`dim-status-${dim}`);
+            if (statusEl) {
+                const dimInfo = dimNames[dim] || { name: dim, icon: '📄' };
+                let icon = '⏳';
+                let className = 'pending';
+
+                if (dimStatus.status === 'completed') {
+                    icon = '✅';
+                    className = 'completed';
+                } else if (dimStatus.status === 'running') {
+                    icon = '🔄';
+                    className = 'running';
+                } else if (dimStatus.status === 'failed') {
+                    icon = '❌';
+                    className = 'failed';
+                }
+
+                statusEl.className = `ai-dimension-status ${className}`;
+                statusEl.innerHTML = `${dimInfo.icon} ${dimInfo.name} ${icon}`;
+
+                // 显示评分
+                if (dimStatus.score) {
+                    statusEl.innerHTML += ` <span style="font-weight: 500;">(${dimStatus.score}分)</span>`;
+                }
+            }
+        }
+    }
+}
+
+async function loadAIResult(taskId) {
+    const container = document.getElementById('ai-result');
+    const tabsContainer = document.getElementById('ai-result-tabs');
+    const progressContainer = document.getElementById('ai-progress-container');
+
+    try {
+        const result = await utils.request(`${API_BASE}/ai/analyze/result/${taskId}`);
+
+        // 隐藏进度条
+        progressContainer.style.display = 'none';
+
+        // 使用统一的结果显示函数
+        displayAIResult(result, container, tabsContainer);
 
         // 刷新历史记录
         await aiPage.loadHistory();
+
+    } catch (error) {
+        progressContainer.style.display = 'none';
+        container.innerHTML = `<div class="text-muted" style="color: var(--danger-color);">${error.message}</div>`;
+    }
+}
+
+async function cancelAIAnalysisTask() {
+    if (!aiTaskId) return;
+
+    try {
+        await utils.request(`${API_BASE}/ai/tasks/${aiTaskId}/cancel`, {
+            method: 'POST'
+        });
+
+        if (aiPollInterval) {
+            clearInterval(aiPollInterval);
+            aiPollInterval = null;
+        }
+
+        document.getElementById('ai-cancel-btn').style.display = 'none';
+        document.getElementById('ai-progress-current').textContent = '分析已取消';
+        utils.showToast('分析任务已取消');
+
+    } catch (error) {
+        utils.showToast(error.message, 'error');
+    }
+}
+
+// 查看异步任务结果
+async function viewAITaskResult(taskId) {
+    const container = document.getElementById('ai-result');
+    const tabsContainer = document.getElementById('ai-result-tabs');
+    const progressContainer = document.getElementById('ai-progress-container');
+
+    progressContainer.style.display = 'none';
+
+    try {
+        const result = await utils.request(`${API_BASE}/ai/analyze/result/${taskId}`);
+        displayAIResult(result, container, tabsContainer);
     } catch (error) {
         container.innerHTML = `<div class="text-muted" style="color: var(--danger-color);">${error.message}</div>`;
         tabsContainer.style.display = 'none';
+    }
+}
+
+// 删除异步任务
+async function deleteAITask(taskId) {
+    if (!confirm('确定要删除这条分析记录吗？')) {
+        return;
+    }
+
+    try {
+        await utils.request(`${API_BASE}/ai/tasks/${taskId}`, {
+            method: 'DELETE'
+        });
+        utils.showToast('删除成功');
+        await aiPage.loadHistory();
+    } catch (error) {
+        utils.showToast(error.message, 'error');
+    }
+}
+
+// 统一显示AI分析结果
+function displayAIResult(result, container, tabsContainer) {
+    const tabsHeader = document.getElementById('ai-tabs-header');
+    const tabsContent = document.getElementById('ai-tabs-content');
+
+    // 确定维度结果来源
+    const dimensionsResult = result.dimensions_result || (result.dimensions ? result.dimensions : {});
+
+    if (dimensionsResult && Object.keys(dimensionsResult).length > 1) {
+        // 多维度分析结果 - 使用Tab切换
+        container.innerHTML = '';
+        tabsContainer.style.display = 'block';
+
+        // 生成Tab头部
+        let headerHtml = '';
+        let contentHtml = '';
+        const dimKeys = Object.keys(dimensionsResult);
+        dimKeys.forEach((dim, index) => {
+            const dimInfo = dimNames[dim] || { name: dim, icon: '📄' };
+            const content = dimensionsResult[dim];
+            const score = content.score ? `<span class="tag ${content.score >= 6 ? 'success' : content.score >= 4 ? 'warning' : 'danger'}">${content.score}分</span>` : '';
+
+            headerHtml += `<button class="ai-tab-btn ${index === 0 ? 'active' : ''}" onclick="switchAITab('${dim}')">${dimInfo.icon} ${dimInfo.name} ${score}</button>`;
+
+            const analysisText = content.analysis || '';
+            contentHtml += `
+                <div class="ai-tab-panel ${index === 0 ? 'active' : ''}" id="tab-panel-${dim}">
+                    <div class="ai-dimension-result">
+                        ${score ? `<div style="margin-bottom: 12px;"><span style="font-weight: 600;">评分：</span>${score}</div>` : ''}
+                        <div class="analysis-content">${typeof marked !== 'undefined' ? marked.parse(analysisText) : analysisText}</div>
+                    </div>
+                </div>
+            `;
+        });
+
+        tabsHeader.innerHTML = headerHtml;
+        tabsContent.innerHTML = contentHtml;
+
+        // 综合评分显示
+        const overallScore = result.overall_score;
+        if (overallScore) {
+            const scoreClass = overallScore >= 6 ? 'success' : overallScore >= 4 ? 'warning' : 'danger';
+            container.innerHTML = `
+                <div class="signal-item" style="margin-bottom: 16px; background: rgba(74, 144, 226, 0.1); padding: 12px; border-radius: 8px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-weight: 600;">🎯 综合评分</span>
+                        <span class="tag ${scoreClass}" style="font-size: 18px; padding: 6px 16px;">${overallScore}/10</span>
+                    </div>
+                </div>
+            `;
+        } else {
+            container.innerHTML = '';
+        }
+    } else if (dimensionsResult && Object.keys(dimensionsResult).length === 1) {
+        // 单维度分析结果
+        tabsContainer.style.display = 'none';
+        const dim = Object.keys(dimensionsResult)[0];
+        const content = dimensionsResult[dim];
+        const dimInfo = dimNames[dim] || { name: dim, icon: '📄' };
+        const score = content.score ? `<span class="tag ${content.score >= 6 ? 'success' : content.score >= 4 ? 'warning' : 'danger'}">${content.score}分</span>` : '';
+
+        container.innerHTML = `
+            <div class="ai-dimension-result">
+                <h4>${dimInfo.icon} ${dimInfo.name} ${score}</h4>
+                <div class="analysis-content">${typeof marked !== 'undefined' ? marked.parse(content.analysis || '') : content.analysis || ''}</div>
+            </div>
+        `;
+    } else if (result.analysis) {
+        // 全仓分析结果
+        tabsContainer.style.display = 'none';
+        container.innerHTML = `<div class="ai-analysis-content">${typeof marked !== 'undefined' ? marked.parse(result.analysis) : result.analysis}</div>`;
+    } else {
+        tabsContainer.style.display = 'none';
+        container.innerHTML = '<div class="text-muted">暂无分析结果</div>';
     }
 }
 
@@ -2397,12 +3750,43 @@ async function viewAIHistory(id) {
     try {
         const result = await utils.request(`${API_BASE}/ai/history/${id}`);
         const container = document.getElementById('ai-result');
+        const tabsContainer = document.getElementById('ai-result-tabs');
+        const progressContainer = document.getElementById('ai-progress-container');
+
+        progressContainer.style.display = 'none';
 
         if (result.analysis_content) {
             const content = typeof result.analysis_content === 'string' ? JSON.parse(result.analysis_content) : result.analysis_content;
-            // 渲染历史记录内容
-            container.innerHTML = `<div class="ai-analysis-content">${typeof marked !== 'undefined' ? marked.parse(content.analysis || content) : content.analysis || content}</div>`;
+
+            // 构造统一格式
+            const unifiedResult = {
+                dimensions_result: content.dimensions || null,
+                analysis: content.analysis || null,
+                overall_score: content.overall_score || result.overall_score
+            };
+
+            displayAIResult(unifiedResult, container, tabsContainer);
+        } else {
+            container.innerHTML = '<div class="text-muted">暂无分析结果</div>';
+            tabsContainer.style.display = 'none';
         }
+    } catch (error) {
+        utils.showToast(error.message, 'error');
+    }
+}
+
+// 删除AI分析历史
+async function deleteAIHistory(id) {
+    if (!confirm('确定要删除这条分析记录吗？')) {
+        return;
+    }
+
+    try {
+        await utils.request(`${API_BASE}/ai/history/${id}`, {
+            method: 'DELETE'
+        });
+        utils.showToast('删除成功');
+        await aiPage.loadHistory();
     } catch (error) {
         utils.showToast(error.message, 'error');
     }
@@ -2638,12 +4022,6 @@ function switchAccount(accountId) {
 }
 
 // 点击模态框外部关闭
-document.getElementById('modal-overlay').addEventListener('click', (e) => {
-    if (e.target.id === 'modal-overlay') {
-        closeModal();
-    }
-});
-
 // 刷新收益曲线
 function refreshProfitChart() {
     const activeBtn = document.querySelector('.time-btn.active');
@@ -2962,13 +4340,15 @@ if (tradesFileInput) {
 // 同步持仓价格
 async function syncPositionPrices() {
     try {
-        utils.showToast('正在同步持仓价格...');
+        utils.showToast('正在同步持仓价格和近一周历史数据...');
 
         const result = await utils.request(`${API_BASE}/sync-prices`, {
             method: 'POST'
         });
 
-        utils.showToast(result.message || `成功更新 ${result.updated} 条持仓价格（股票${result.stocks || 0}只，基金${result.funds || 0}只）`);
+        const msg = result.message || `成功更新 ${result.updated} 条持仓价格`;
+        const historyMsg = result.history_updated ? `，获取 ${result.history_updated} 条历史数据` : '';
+        utils.showToast(msg + historyMsg);
 
         // 刷新当前页面数据
         if (pageManager.currentPage === 'dashboard') {
@@ -2981,19 +4361,87 @@ async function syncPositionPrices() {
     }
 }
 
-// 获取持仓历史数据
+// 获取持仓历史数据（后台分批获取）
+let historyFetchInterval = null;
+
 async function fetchPositionHistory() {
     try {
-        utils.showToast('正在获取历史数据，请稍候...');
+        // 先检查是否已有任务在运行
+        const progressResult = await utils.request(`${API_BASE}/fetch-history/progress`);
 
-        const result = await utils.request(`${API_BASE}/fetch-history`, {
+        if (progressResult.status === 'running') {
+            utils.showToast('已有获取任务在运行，请等待完成');
+            showFetchProgress();
+            return;
+        }
+
+        // 启动后台获取任务
+        const result = await utils.request(`${API_BASE}/fetch-history/background`, {
             method: 'POST',
-            body: JSON.stringify({ years: 5 })
+            body: JSON.stringify({ years: 10 })
         });
 
-        const stocks = Object.keys(result.data?.stocks || {}).length;
-        const funds = Object.keys(result.data?.funds || {}).length;
-        utils.showToast(result.message || `成功获取 ${stocks} 只股票、${funds} 只基金的历史数据`);
+        if (result.success) {
+            utils.showToast(result.message || '后台获取任务已启动');
+            showFetchProgress();
+        } else {
+            utils.showToast(result.message || '启动失败', 'error');
+        }
+    } catch (error) {
+        utils.showToast(error.message, 'error');
+    }
+}
+
+// 显示获取进度
+async function showFetchProgress() {
+    // 每5秒检查一次进度
+    if (historyFetchInterval) {
+        clearInterval(historyFetchInterval);
+    }
+
+    historyFetchInterval = setInterval(async () => {
+        try {
+            const progress = await utils.request(`${API_BASE}/fetch-history/progress`);
+
+            if (progress.status === 'running') {
+                const symbol = progress.current_symbol || '';
+                const name = progress.current_name || '';
+                const completed = progress.completed || 0;
+                const total = progress.total || 0;
+                const pct = total > 0 ? Math.round(completed / total * 100) : 0;
+
+                utils.showToast(`${name} (${symbol}) - 进度: ${completed}/${total} (${pct}%)`);
+            } else if (progress.status === 'completed') {
+                clearInterval(historyFetchInterval);
+                historyFetchInterval = null;
+                utils.showToast(progress.message || '获取完成！', 'success');
+            } else if (progress.status === 'stopped') {
+                clearInterval(historyFetchInterval);
+                historyFetchInterval = null;
+                utils.showToast(progress.message || '已停止', 'warning');
+            } else if (progress.status === 'error') {
+                clearInterval(historyFetchInterval);
+                historyFetchInterval = null;
+                utils.showToast(progress.message || '获取失败', 'error');
+            }
+        } catch (error) {
+            clearInterval(historyFetchInterval);
+            historyFetchInterval = null;
+        }
+    }, 5000);
+}
+
+// 停止获取任务
+async function stopFetchHistory() {
+    try {
+        await utils.request(`${API_BASE}/fetch-history/stop`, { method: 'POST' });
+
+        if (historyFetchInterval) {
+            clearInterval(historyFetchInterval);
+            historyFetchInterval = null;
+        }
+
+        utils.showToast('已停止获取任务', 'warning');
     } catch (error) {
         utils.showToast(error.message, 'error');
     }

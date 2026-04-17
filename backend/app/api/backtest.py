@@ -12,11 +12,14 @@ from io import BytesIO
 import os
 import pandas as pd
 import json
+import logging
 from .. import db
 from ..utils import success_response, error_response
 from ..utils.decorators import login_required
 from ..utils.config import config_manager
-from ..models import PriceHistory
+from ..models import PriceHistory, BacktestHistory
+
+logger = logging.getLogger(__name__)
 from ..services.backtest_service import (
     BacktestEngine, StrategyType, create_strategy,
     run_multi_strategy_backtest, get_available_strategies
@@ -265,26 +268,112 @@ def get_price_histories():
         results = db.session.query(
             PriceHistory.symbol,
             PriceHistory.name,
+            PriceHistory.asset_type,
             db.func.count(PriceHistory.id).label('count'),
             db.func.min(PriceHistory.trade_date).label('start_date'),
             db.func.max(PriceHistory.trade_date).label('end_date')
         ).filter(
             PriceHistory.user_id == user_id
         ).group_by(
-            PriceHistory.symbol, PriceHistory.name
+            PriceHistory.symbol, PriceHistory.name, PriceHistory.asset_type
         ).all()
 
         histories = []
+        need_update_funds = []  # 需要更新名称的基金
+
         for r in results:
+            name = r.name
+            # 如果是基金且没有名称，记录下来
+            if r.asset_type == 'fund' and not name:
+                need_update_funds.append(r.symbol)
+
             histories.append({
                 'symbol': r.symbol,
-                'name': r.name,
+                'name': name,
+                'asset_type': r.asset_type or 'stock',
                 'count': r.count,
                 'start_date': r.start_date.isoformat() if r.start_date else None,
                 'end_date': r.end_date.isoformat() if r.end_date else None
             })
 
+        # 更新缺少名称的基金
+        if need_update_funds:
+            try:
+                import akshare as ak
+                for symbol in need_update_funds:
+                    try:
+                        fund_info = ak.fund_individual_basic_info_xq(symbol=symbol)
+                        if fund_info is not None and len(fund_info) > 0:
+                            name_row = fund_info[fund_info['item'] == '基金名称']
+                            if not name_row.empty:
+                                fund_name = name_row.iloc[0]['value']
+                                # 更新数据库中的名称
+                                PriceHistory.query.filter(
+                                    PriceHistory.user_id == user_id,
+                                    PriceHistory.symbol == symbol
+                                ).update({'name': fund_name})
+                                # 更新返回结果
+                                for h in histories:
+                                    if h['symbol'] == symbol:
+                                        h['name'] = fund_name
+                                logger.info(f"更新基金名称: {symbol} -> {fund_name}")
+                    except Exception as e:
+                        logger.warning(f"获取基金 {symbol} 名称失败: {str(e)}")
+                        continue
+
+                db.session.commit()
+            except Exception as e:
+                logger.warning(f"更新基金名称失败: {str(e)}")
+
         return success_response(histories)
+    except Exception as e:
+        return error_response(str(e))
+
+
+@backtest_bp.route('/backtest/quick-select-symbols', methods=['GET'])
+@login_required
+def get_quick_select_symbols():
+    """获取快速选择的股票/基金列表（从持仓和历史数据中获取）"""
+    try:
+        user_id = request.current_user_id
+        from ..models import Position
+
+        stocks = {}  # {symbol: name}
+        funds = {}   # {symbol: name}
+
+        # 1. 从持仓中获取
+        positions = Position.query.filter_by(user_id=user_id).all()
+        for p in positions:
+            if p.asset_type in ['stock', 'etf_index', 'etf_sector']:
+                if p.symbol not in stocks:
+                    stocks[p.symbol] = p.name or p.symbol
+            elif p.asset_type == 'fund':
+                if p.symbol not in funds:
+                    funds[p.symbol] = p.name or p.symbol
+
+        # 2. 从历史数据中获取
+        results = db.session.query(
+            PriceHistory.symbol,
+            PriceHistory.name,
+            PriceHistory.asset_type
+        ).filter(
+            PriceHistory.user_id == user_id
+        ).group_by(
+            PriceHistory.symbol, PriceHistory.name, PriceHistory.asset_type
+        ).all()
+
+        for r in results:
+            if r.asset_type == 'fund':
+                if r.symbol not in funds:
+                    funds[r.symbol] = r.name or r.symbol
+            else:
+                if r.symbol not in stocks:
+                    stocks[r.symbol] = r.name or r.symbol
+
+        return success_response({
+            'stocks': [{'symbol': k, 'name': v} for k, v in sorted(stocks.items())],
+            'funds': [{'symbol': k, 'name': v} for k, v in sorted(funds.items())]
+        })
     except Exception as e:
         return error_response(str(e))
 
@@ -315,17 +404,18 @@ def delete_price_history(symbol):
 @backtest_bp.route('/backtest/fetch-data', methods=['POST'])
 @login_required
 def fetch_data_from_source():
-    """从在线数据源获取股票历史数据（支持AKShare/BaoStock/Tushare）"""
+    """从在线数据源获取历史数据（支持股票/基金）"""
     try:
         data = request.get_json()
         symbol = data.get('symbol', '')
         name = data.get('name', symbol)
         start_date = data.get('start_date', '')
         end_date = data.get('end_date', '')
-        data_source = data.get('data_source', 'baostock')  # 默认使用BaoStock
+        data_source = data.get('data_source', 'akshare')  # akshare, baostock, tushare, eastmoney
+        asset_type = data.get('asset_type', 'stock')  # stock 或 fund
 
         if not symbol:
-            return error_response('请输入股票代码')
+            return error_response('请输入标的代码')
 
         if not start_date or not end_date:
             return error_response('请选择开始和结束日期')
@@ -335,70 +425,139 @@ def fetch_data_from_source():
         # 获取市场数据服务
         market_service = get_market_data_service()
 
-        # 根据数据源获取数据
+        # 根据资产类型获取数据
         df = pd.DataFrame()
 
-        if data_source == 'tushare':
-            tushare_service = get_tushare_service()
-            if not tushare_service.token:
-                return error_response('Tushare未配置，请先在系统设置中配置Token')
-            ts_code = tushare_service.convert_symbol_to_ts_code(symbol)
-            df = tushare_service.get_stock_daily(ts_code, start_date.replace('-', ''), end_date.replace('-', ''))
-        elif data_source in ['akshare', 'baostock']:
-            # 使用market_data_service，它会自动选择可用数据源
-            df = market_service.get_stock_history(symbol, start_date, end_date, user_id=user_id)
+        if asset_type == 'fund':
+            # 获取基金净值数据
+            df = market_service.get_fund_nav_history(symbol, start_date, end_date, user_id=user_id)
 
-        if df.empty:
-            return error_response('未获取到数据，请检查股票代码和日期范围')
+            if df.empty:
+                return error_response('未获取到基金数据，请检查基金代码和日期范围')
 
-        # 保存到数据库
-        records = []
-        for _, row in df.iterrows():
-            date_val = row.get('date') or row.get('trade_date')
-            if pd.isna(date_val):
-                continue
+            # 自动获取基金名称
+            if not name or name == symbol:
+                try:
+                    import akshare as ak
+                    fund_info = ak.fund_individual_basic_info_xq(symbol=symbol)
+                    if fund_info is not None and len(fund_info) > 0:
+                        name_row = fund_info[fund_info['item'] == '基金名称']
+                        if not name_row.empty:
+                            name = name_row.iloc[0]['value']
+                            logger.info(f"获取基金名称: {symbol} -> {name}")
+                except Exception as e:
+                    logger.warning(f"获取基金名称失败: {str(e)}")
 
-            record = PriceHistory(
-                user_id=user_id,
-                symbol=symbol,
-                name=name,
-                asset_type='stock',
-                trade_date=pd.to_datetime(date_val).date(),
-                open_price=float(row['open']) if pd.notna(row.get('open')) else None,
-                high_price=float(row['high']) if pd.notna(row.get('high')) else None,
-                low_price=float(row['low']) if pd.notna(row.get('low')) else None,
-                close_price=float(row['close']) if pd.notna(row.get('close')) else None,
-                volume=int(row['volume']) if pd.notna(row.get('volume')) else None,
-                turnover=float(row['amount']) if pd.notna(row.get('amount')) else None,
-                change_pct=float(row['pct_chg']) if pd.notna(row.get('pct_chg')) else None,
-                data_source=data_source
-            )
-            records.append(record)
+            # 将基金净值数据转换为回测格式（用nav作为close）
+            if 'nav' in df.columns:
+                df['close'] = df['nav']
+            if 'date' not in df.columns and df.index.name == 'date':
+                df = df.reset_index()
 
-        if not records:
-            return error_response('数据解析失败')
+            # 保存到数据库
+            records = []
+            for _, row in df.iterrows():
+                date_val = row.get('date')
+                if pd.isna(date_val):
+                    continue
 
-        # 使用 bulk_insert_mappings 避免重复
-        # 先删除该symbol在日期范围内的旧数据
-        PriceHistory.query.filter(
-            PriceHistory.user_id == user_id,
-            PriceHistory.symbol == symbol,
-            PriceHistory.trade_date >= pd.to_datetime(start_date).date(),
-            PriceHistory.trade_date <= pd.to_datetime(end_date).date()
-        ).delete()
+                record = PriceHistory(
+                    user_id=user_id,
+                    symbol=symbol,
+                    name=name,
+                    asset_type='fund',
+                    trade_date=pd.to_datetime(date_val).date(),
+                    close_price=float(row['close']) if pd.notna(row.get('close')) else None,
+                    acc_nav=float(row['acc_nav']) if pd.notna(row.get('acc_nav')) else None,
+                    change_pct=float(row['change_pct']) if pd.notna(row.get('change_pct')) else None,
+                    data_source='eastmoney'
+                )
+                records.append(record)
 
-        db.session.bulk_save_objects(records)
-        db.session.commit()
+            if records:
+                # 删除该symbol在日期范围内的旧数据
+                PriceHistory.query.filter(
+                    PriceHistory.user_id == user_id,
+                    PriceHistory.symbol == symbol,
+                    PriceHistory.trade_date >= pd.to_datetime(start_date).date(),
+                    PriceHistory.trade_date <= pd.to_datetime(end_date).date()
+                ).delete()
+                db.session.bulk_save_objects(records)
+                db.session.commit()
 
-        return success_response({
-            'success': True,
-            'message': f'成功获取 {len(records)} 条数据',
-            'count': len(records),
-            'symbol': symbol,
-            'start_date': start_date,
-            'end_date': end_date,
-            'data_source': data_source
-        })
+            return success_response({
+                'success': True,
+                'message': f'成功获取 {len(records)} 条基金净值数据',
+                'count': len(records),
+                'symbol': symbol,
+                'start_date': start_date,
+                'end_date': end_date,
+                'asset_type': 'fund',
+                'data_source': 'eastmoney'
+            })
+
+        else:
+            # 获取股票数据
+            if data_source == 'tushare':
+                tushare_service = get_tushare_service()
+                if not tushare_service.token:
+                    return error_response('Tushare未配置，请先在系统设置中配置Token')
+                ts_code = tushare_service.convert_symbol_to_ts_code(symbol)
+                df = tushare_service.get_stock_daily(ts_code, start_date.replace('-', ''), end_date.replace('-', ''))
+            elif data_source in ['akshare', 'baostock']:
+                df = market_service.get_stock_history(symbol, start_date, end_date, user_id=user_id)
+
+            if df.empty:
+                return error_response('未获取到股票数据，请检查股票代码和日期范围')
+
+            # 保存到数据库
+            records = []
+            for _, row in df.iterrows():
+                date_val = row.get('date') or row.get('trade_date')
+                if pd.isna(date_val):
+                    continue
+
+                record = PriceHistory(
+                    user_id=user_id,
+                    symbol=symbol,
+                    name=name,
+                    asset_type='stock',
+                    trade_date=pd.to_datetime(date_val).date(),
+                    open_price=float(row['open']) if pd.notna(row.get('open')) else None,
+                    high_price=float(row['high']) if pd.notna(row.get('high')) else None,
+                    low_price=float(row['low']) if pd.notna(row.get('low')) else None,
+                    close_price=float(row['close']) if pd.notna(row.get('close')) else None,
+                    volume=int(row['volume']) if pd.notna(row.get('volume')) else None,
+                    turnover=float(row['amount']) if pd.notna(row.get('amount')) else None,
+                    change_pct=float(row['pct_chg']) if pd.notna(row.get('pct_chg')) else None,
+                    data_source=data_source
+                )
+                records.append(record)
+
+            if not records:
+                return error_response('数据解析失败')
+
+            # 删除该symbol在日期范围内的旧数据
+            PriceHistory.query.filter(
+                PriceHistory.user_id == user_id,
+                PriceHistory.symbol == symbol,
+                PriceHistory.trade_date >= pd.to_datetime(start_date).date(),
+                PriceHistory.trade_date <= pd.to_datetime(end_date).date()
+            ).delete()
+
+            db.session.bulk_save_objects(records)
+            db.session.commit()
+
+            return success_response({
+                'success': True,
+                'message': f'成功获取 {len(records)} 条股票数据',
+                'count': len(records),
+                'symbol': symbol,
+                'start_date': start_date,
+                'end_date': end_date,
+                'asset_type': 'stock',
+                'data_source': data_source
+            })
     except Exception as e:
         db.session.rollback()
         import traceback
@@ -409,19 +568,20 @@ def fetch_data_from_source():
 @backtest_bp.route('/backtest/run', methods=['POST'])
 @login_required
 def run_backtest():
-    """运行回测（支持多策略对比，多数据源）"""
+    """运行回测（支持多策略对比，多数据源，股票/基金）"""
     try:
         data = request.get_json()
         user_id = request.current_user_id
 
         # 获取参数
         symbol = data.get('symbol', '')
-        data_source = data.get('data_source', 'akshare')  # akshare, baostock, tushare, local
+        data_source = data.get('data_source', 'akshare')  # akshare, baostock, tushare, local, eastmoney
         start_date = data.get('start_date', '')
         end_date = data.get('end_date', '')
         initial_capital = float(data.get('initial_capital', 100000))
         strategies = data.get('strategies', ['double_ma'])  # 策略列表
         strategy_params = data.get('strategy_params', {})  # 各策略参数
+        asset_type = data.get('asset_type', 'stock')  # stock 或 fund
 
         # 默认时间范围
         if not end_date:
@@ -429,83 +589,42 @@ def run_backtest():
         if not start_date:
             start_date = (datetime.now() - pd.DateOffset(years=1)).strftime('%Y-%m-%d')
 
-        # 获取价格数据
+        # 获取市场数据服务
+        market_service = get_market_data_service()
+
+        # 获取价格数据 - 优先从数据库读取
         price_df = None
 
-        if data_source == 'akshare':
-            # 从AKShare获取数据
-            try:
-                from ..services.akshare_service import get_akshare_service
-                ak = get_akshare_service()
-                price_df = ak.get_stock_daily(symbol, start_date, end_date)
+        if asset_type == 'fund':
+            # 获取基金净值数据（内部会先查数据库）
+            price_df = market_service.get_fund_nav_history(symbol, start_date, end_date, user_id=user_id)
 
-                if price_df.empty:
-                    # 尝试使用BaoStock
-                    from ..services.baostock_service import get_baostock_service
-                    bs = get_baostock_service()
-                    price_df = bs.get_stock_daily(symbol, start_date, end_date)
+            if price_df.empty:
+                return error_response(f'未获取到基金 {symbol} 的净值数据，请检查基金代码')
 
-                # 保存到数据库
-                if not price_df.empty:
-                    _save_backtest_data(user_id, symbol, price_df, 'akshare')
-            except Exception as e:
-                return error_response(f'AKShare获取数据失败: {str(e)}')
-
-        elif data_source == 'baostock':
-            # 从BaoStock获取数据
-            try:
-                from ..services.baostock_service import get_baostock_service
-                bs = get_baostock_service()
-                price_df = bs.get_stock_daily(symbol, start_date, end_date)
-
-                # 保存到数据库
-                if not price_df.empty:
-                    _save_backtest_data(user_id, symbol, price_df, 'baostock')
-            except Exception as e:
-                return error_response(f'BaoStock获取数据失败: {str(e)}')
-
-        elif data_source == 'tushare':
-            # 从Tushare获取数据
-            tushare_service = get_tushare_service()
-            if not tushare_service.token:
-                return error_response('Tushare未配置')
-
-            ts_code = tushare_service.convert_symbol_to_ts_code(symbol)
-            start = start_date.replace('-', '') if start_date else '20230101'
-            end = end_date.replace('-', '') if end_date else datetime.now().strftime('%Y%m%d')
-
-            price_df = tushare_service.get_stock_daily(ts_code, start, end)
-
-            if not price_df.empty:
-                _save_backtest_data(user_id, symbol, price_df, 'tushare')
+            # 将净值数据转换为回测格式
+            # 确保 close 列存在（用于回测）
+            if 'close' not in price_df.columns and 'nav' in price_df.columns:
+                price_df['close'] = price_df['nav']
+            if 'date' not in price_df.columns:
+                price_df = price_df.reset_index()
 
         else:
-            # 使用本地/数据库数据
-            query = PriceHistory.query.filter(
+            # 股票数据：优先从数据库读取，不足时再从在线获取
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
+
+            # 1. 先查数据库
+            histories = PriceHistory.query.filter(
                 PriceHistory.user_id == user_id,
-                PriceHistory.symbol == symbol
-            )
+                PriceHistory.symbol == symbol,
+                PriceHistory.trade_date >= start_dt,
+                PriceHistory.trade_date <= end_dt
+            ).order_by(PriceHistory.trade_date).all()
 
-            if start_date:
-                query = query.filter(PriceHistory.trade_date >= start_date)
-            if end_date:
-                query = query.filter(PriceHistory.trade_date <= end_date)
-
-            histories = query.order_by(PriceHistory.trade_date).all()
-
-            if not histories:
-                # 尝试从免费数据源获取
-                try:
-                    from ..services.market_data_service import get_market_data_service
-                    mds = get_market_data_service()
-                    price_df = mds.get_stock_history(symbol, start_date, end_date, user_id)
-                except:
-                    pass
-
-                if price_df is None or price_df.empty:
-                    return error_response(f'未找到标的 {symbol} 的历史数据，请选择其他数据源')
-            else:
-                # 转换为DataFrame
+            if histories and len(histories) >= 5:
+                # 数据库有足够数据，直接使用
+                logger.info(f"从数据库读取 {symbol} 历史数据 {len(histories)} 条")
                 price_df = pd.DataFrame([{
                     'date': h.trade_date.isoformat(),
                     'open': float(h.open_price) if h.open_price else None,
@@ -514,6 +633,65 @@ def run_backtest():
                     'close': float(h.close_price) if h.close_price else None,
                     'volume': float(h.volume) if h.volume else None
                 } for h in histories])
+            else:
+                # 2. 数据库数据不足，从在线数据源获取
+                logger.info(f"数据库数据不足({len(histories) if histories else 0}条)，从在线数据源获取")
+
+                if data_source == 'akshare':
+                    # 从AKShare获取股票数据
+                    try:
+                        from ..services.akshare_service import get_akshare_service
+                        ak = get_akshare_service()
+                        price_df = ak.get_stock_daily(symbol, start_date, end_date)
+
+                        # 保存到数据库
+                        if not price_df.empty:
+                            _save_backtest_data(user_id, symbol, price_df, 'akshare')
+                    except Exception as e:
+                        logger.warning(f"AKShare获取数据失败: {str(e)}，尝试BaoStock")
+                        price_df = pd.DataFrame()  # 重置为空，尝试BaoStock
+
+                    # AKShare失败或返回空，尝试BaoStock
+                    if price_df.empty:
+                        try:
+                            from ..services.baostock_service import get_baostock_service
+                            bs = get_baostock_service()
+                            price_df = bs.get_stock_daily(symbol, start_date, end_date)
+
+                            if not price_df.empty:
+                                _save_backtest_data(user_id, symbol, price_df, 'baostock')
+                        except Exception as e2:
+                            logger.warning(f"BaoStock获取数据也失败: {str(e2)}")
+
+                elif data_source == 'baostock':
+                    # 从BaoStock获取数据
+                    try:
+                        from ..services.baostock_service import get_baostock_service
+                        bs = get_baostock_service()
+                        price_df = bs.get_stock_daily(symbol, start_date, end_date)
+
+                        # 保存到数据库
+                        if not price_df.empty:
+                            _save_backtest_data(user_id, symbol, price_df, 'baostock')
+                    except Exception as e:
+                        logger.warning(f"BaoStock获取数据失败: {str(e)}")
+
+                elif data_source == 'tushare':
+                    # 从Tushare获取数据
+                    tushare_service = get_tushare_service()
+                    if tushare_service.token:
+                        ts_code = tushare_service.convert_symbol_to_ts_code(symbol)
+                        start = start_date.replace('-', '')
+                        end = end_date.replace('-', '')
+
+                        price_df = tushare_service.get_stock_daily(ts_code, start, end)
+
+                        if not price_df.empty:
+                            _save_backtest_data(user_id, symbol, price_df, 'tushare')
+
+                else:
+                    # local 或其他：使用 market_data_service（内部会自动获取并保存）
+                    price_df = market_service.get_stock_history(symbol, start_date, end_date, user_id=user_id)
 
         if price_df is None or price_df.empty or len(price_df) < 5:
             return error_response('数据不足，无法进行回测')
@@ -533,6 +711,10 @@ def run_backtest():
         if not strategy_types:
             return error_response('请选择至少一个策略')
 
+        # 自动添加全仓持有策略作为基准（如果用户没有选择）
+        if StrategyType.BUY_AND_HOLD not in strategy_types:
+            strategy_types.append(StrategyType.BUY_AND_HOLD)
+
         # 运行多策略回测
         results = run_multi_strategy_backtest(
             data=price_df,
@@ -546,6 +728,7 @@ def run_backtest():
         response_data = {
             'symbol': symbol,
             'data_source': data_source,
+            'asset_type': asset_type,
             'initial_capital': initial_capital,
             'start_date': price_df['date'].iloc[0],
             'end_date': price_df['date'].iloc[-1],
@@ -581,6 +764,53 @@ def run_backtest():
         # 按收益率排序
         response_data['strategies'].sort(key=lambda x: x['total_return'], reverse=True)
 
+        # 找出最佳策略
+        best_strategy = response_data['strategies'][0] if response_data['strategies'] else None
+
+        # 保存回测历史
+        try:
+            from datetime import date as date_type
+
+            start_dt = datetime.strptime(response_data['start_date'], '%Y-%m-%d').date()
+            end_dt = datetime.strptime(response_data['end_date'], '%Y-%m-%d').date()
+
+            # 检查是否已存在相同的历史记录
+            existing = BacktestHistory.query.filter_by(
+                user_id=user_id,
+                symbol=symbol,
+                start_date=start_dt,
+                end_date=end_dt
+            ).first()
+
+            if existing:
+                # 更新现有记录
+                existing.results = json.dumps(response_data, ensure_ascii=False)
+                existing.strategy_type = 'multi' if len(strategies) > 1 else strategies[0]
+                existing.best_strategy = best_strategy['strategy_name'] if best_strategy else None
+                existing.best_return = best_strategy['total_return'] if best_strategy else None
+                logger.info(f"更新回测历史记录: {symbol} {start_dt} ~ {end_dt}")
+            else:
+                # 创建新记录
+                history_record = BacktestHistory(
+                    user_id=user_id,
+                    symbol=symbol,
+                    name=response_data.get('name'),
+                    start_date=start_dt,
+                    end_date=end_dt,
+                    initial_capital=initial_capital,
+                    strategy_type='multi' if len(strategies) > 1 else strategies[0],
+                    results=json.dumps(response_data, ensure_ascii=False),
+                    best_strategy=best_strategy['strategy_name'] if best_strategy else None,
+                    best_return=best_strategy['total_return'] if best_strategy else None
+                )
+                db.session.add(history_record)
+                logger.info(f"保存回测历史记录: {symbol} {start_dt} ~ {end_dt}")
+
+            db.session.commit()
+        except Exception as save_error:
+            db.session.rollback()
+            logger.warning(f"保存回测历史失败: {str(save_error)}")
+
         return success_response(response_data)
     except Exception as e:
         import traceback
@@ -610,7 +840,11 @@ def compare_scenarios():
 
         price_df = pd.DataFrame([{
             'date': h.trade_date.isoformat(),
-            'close': h.close_price
+            'close': float(h.close_price) if h.close_price else None,
+            'open': float(h.open_price) if h.open_price else None,
+            'high': float(h.high_price) if h.high_price else None,
+            'low': float(h.low_price) if h.low_price else None,
+            'volume': float(h.volume) if h.volume else None
         } for h in histories])
 
         # 运行所有策略
@@ -696,3 +930,85 @@ def _save_backtest_data(user_id: int, symbol: str, price_df: pd.DataFrame, data_
     except Exception as e:
         db.session.rollback()
         print(f"保存回测数据失败: {e}")
+
+
+# ==================== 回测历史 API ====================
+
+@backtest_bp.route('/backtest/history', methods=['GET'])
+@login_required
+def get_backtest_history():
+    """获取回测历史列表"""
+    try:
+        user_id = request.current_user_id
+
+        histories = BacktestHistory.query.filter_by(user_id=user_id).order_by(
+            BacktestHistory.created_at.desc()
+        ).limit(50).all()
+
+        result = [{
+            'id': h.id,
+            'symbol': h.symbol,
+            'name': h.name,
+            'start_date': h.start_date.isoformat(),
+            'end_date': h.end_date.isoformat(),
+            'initial_capital': float(h.initial_capital),
+            'strategy_type': h.strategy_type,
+            'best_strategy': h.best_strategy,
+            'best_return': float(h.best_return) if h.best_return else None,
+            'created_at': h.created_at.isoformat() if h.created_at else None
+        } for h in histories]
+
+        return success_response(result)
+    except Exception as e:
+        return error_response(str(e))
+
+
+@backtest_bp.route('/backtest/history/<int:history_id>', methods=['GET'])
+@login_required
+def get_backtest_history_detail(history_id):
+    """获取回测历史详情"""
+    try:
+        user_id = request.current_user_id
+
+        history = BacktestHistory.query.filter_by(id=history_id, user_id=user_id).first()
+
+        if not history:
+            return error_response('历史记录不存在')
+
+        result = {
+            'id': history.id,
+            'symbol': history.symbol,
+            'name': history.name,
+            'start_date': history.start_date.isoformat(),
+            'end_date': history.end_date.isoformat(),
+            'initial_capital': float(history.initial_capital),
+            'strategy_type': history.strategy_type,
+            'best_strategy': history.best_strategy,
+            'best_return': float(history.best_return) if history.best_return else None,
+            'created_at': history.created_at.isoformat() if history.created_at else None,
+            'results': json.loads(history.results) if history.results else None
+        }
+
+        return success_response(result)
+    except Exception as e:
+        return error_response(str(e))
+
+
+@backtest_bp.route('/backtest/history/<int:history_id>', methods=['DELETE'])
+@login_required
+def delete_backtest_history(history_id):
+    """删除回测历史"""
+    try:
+        user_id = request.current_user_id
+
+        history = BacktestHistory.query.filter_by(id=history_id, user_id=user_id).first()
+
+        if not history:
+            return error_response('历史记录不存在')
+
+        db.session.delete(history)
+        db.session.commit()
+
+        return success_response({'message': '删除成功'})
+    except Exception as e:
+        return error_response(str(e))

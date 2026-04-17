@@ -22,6 +22,7 @@ class StrategyType(Enum):
     MOMENTUM = "momentum"             # 动量策略
     GRID = "grid"                     # 网格交易策略
     PYRAMID = "pyramid"               # 金字塔加仓策略
+    BUY_AND_HOLD = "buy_and_hold"     # 全仓买入持有策略
 
 
 @dataclass
@@ -108,7 +109,8 @@ class DoubleMAStrategy(BaseStrategy):
     def get_default_params(self) -> Dict:
         return {
             'short_window': 5,
-            'long_window': 20
+            'long_window': 20,
+            'initial_position': 0.3  # 初始仓位比例
         }
 
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -142,7 +144,8 @@ class BollingerBandsStrategy(BaseStrategy):
     def get_default_params(self) -> Dict:
         return {
             'window': 20,
-            'k': 2.0
+            'k': 2.0,
+            'initial_position': 0.3  # 初始仓位比例
         }
 
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -179,7 +182,8 @@ class RSIStrategy(BaseStrategy):
         return {
             'period': 14,
             'oversold': 30,
-            'overbought': 70
+            'overbought': 70,
+            'initial_position': 0.3  # 初始仓位比例
         }
 
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -221,7 +225,8 @@ class MomentumStrategy(BaseStrategy):
         return {
             'window': 20,
             'buy_threshold': 0.05,
-            'sell_threshold': -0.05
+            'sell_threshold': -0.05,
+            'initial_position': 0.3  # 初始仓位比例
         }
 
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -256,7 +261,8 @@ class GridTradingStrategy(BaseStrategy):
         return {
             'grid_count': 10,
             'grid_range': 0.20,  # 网格范围（上下各20%）
-            'base_position': 0.5  # 初始仓位
+            'base_position': 0.5,  # 初始仓位
+            'initial_position': 0.5  # 初始仓位比例
         }
 
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -284,6 +290,29 @@ class GridTradingStrategy(BaseStrategy):
         df.loc[df['grid_change'] < 0, 'trade_signal'] = -1
 
         df['signal'] = df['trade_signal']
+
+        return df
+
+
+class BuyAndHoldStrategy(BaseStrategy):
+    """全仓买入持有策略（基准策略）"""
+
+    display_name = "全仓持有策略"
+
+    def get_default_params(self) -> Dict:
+        return {
+            'initial_position': 1.0  # 全仓买入
+        }
+
+    def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
+        """第一天全仓买入，之后不做任何操作"""
+        df = data.copy()
+        df['signal'] = 0
+        df['trade_signal'] = 0
+
+        # 第一天买入信号
+        if len(df) > 0:
+            df.loc[df.index[0], 'trade_signal'] = 1
 
         return df
 
@@ -324,6 +353,7 @@ STRATEGY_REGISTRY = {
     StrategyType.MOMENTUM: MomentumStrategy,
     StrategyType.GRID: GridTradingStrategy,
     StrategyType.PYRAMID: PyramidStrategy,
+    StrategyType.BUY_AND_HOLD: BuyAndHoldStrategy,
 }
 
 
@@ -386,6 +416,9 @@ class BacktestEngine:
         if isinstance(strategy, PyramidStrategy):
             return self._run_pyramid_backtest(df, strategy, symbol)
 
+        # 获取策略的初始仓位比例
+        initial_position_ratio = strategy.params.get('initial_position', 0.3)
+
         # 遍历数据执行交易
         position = 0
         cost_price = 0
@@ -401,17 +434,34 @@ class BacktestEngine:
             amount = 0
 
             if trade_signal == 1 and position == 0:
-                # 买入信号，全仓买入
-                shares = int(self.cash / close_price)
+                # 买入信号，按策略仓位比例买入
+                # 先预留手续费，再计算可买入股数
+                buy_amount = self.cash * initial_position_ratio
+                # 预留手续费空间（约0.1%）
+                available_for_purchase = buy_amount / (1 + self.commission_rate)
+                shares = int(available_for_purchase / close_price)
                 if shares > 0:
                     commission = shares * close_price * self.commission_rate
                     cost = shares * close_price + commission
-                    self.cash -= cost
-                    position = shares
-                    cost_price = close_price
-                    action = "买入"
-                    direction = "buy"
-                    amount = cost
+                    if cost <= self.cash:
+                        self.cash -= cost
+                        position = shares
+                        cost_price = close_price
+                        action = "买入"
+                        direction = "buy"
+                        amount = cost
+                    else:
+                        # 如果还是超预算，按实际可买数量调整
+                        shares = int((self.cash * initial_position_ratio - 50) / close_price)  # 预留50元手续费
+                        if shares > 0:
+                            commission = shares * close_price * self.commission_rate
+                            cost = shares * close_price + commission
+                            self.cash -= cost
+                            position = shares
+                            cost_price = close_price
+                            action = "买入"
+                            direction = "buy"
+                            amount = cost
 
             elif trade_signal == -1 and position > 0:
                 # 卖出信号，清仓
@@ -664,9 +714,8 @@ class BacktestEngine:
         return win_rate, win_count, lose_count, profit_loss_ratio
 
     def _generate_summary(self, strategy_name: str, total_return: float, max_drawdown: float, win_rate: float) -> str:
-        """生成总结"""
+        """生成总结（不包含策略名称，避免重复显示）"""
         lines = [
-            f"策略：{strategy_name}",
             f"总收益率：{total_return*100:+.2f}%",
             f"最大回撤：{max_drawdown*100:.2f}%",
             f"胜率：{win_rate*100:.1f}%",

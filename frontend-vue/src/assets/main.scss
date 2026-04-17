@@ -1,0 +1,365 @@
+// 变量
+$primary-color: #4A90E2;
+$secondary-color: #6C757D;
+$success-color: #28A745;
+$danger-color: #DC3545;
+$warning-color: #FFC107;
+$info-color: #17A2B8;
+
+$bg-primary: #FFFFFF;
+$bg-secondary: #F8F9FA;
+$text-primary: #212529;
+$text-secondary: #6C757D;
+$text-muted: #9CA3AF;
+
+$border-radius: 12px;
+$sidebar-width: 250px;
+
+// 全局样式
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background-color: $bg-secondary;
+  color: $text-primary;
+  line-height: 1.6;
+}
+
+// 应用容器
+.app-container {
+  display: flex;
+  min-height: 100vh;
+}
+
+// 侧边栏
+.sidebar {
+  width: $sidebar-width;
+  background: $bg-primary;
+  border-right: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  height: 100vh;
+  z-index: 100;
+  transition: transform 0.3s ease;
+
+  .logo {
+    padding: 20px;
+    border-bottom: 1px solid #e5e7eb;
+    h2 {
+      font-size: 18px;
+      color: $text-primary;
+    }
+  }
+
+  .nav-menu {
+    flex: 1;
+    padding: 10px;
+    overflow-y: auto;
+  }
+
+  .nav-item {
+    display: flex;
+    align-items: center;
+    padding: 12px 16px;
+    color: $text-secondary;
+    text-decoration: none;
+    border-radius: 8px;
+    margin-bottom: 4px;
+    transition: all 0.2s;
+
+    .icon {
+      margin-right: 12px;
+      font-size: 18px;
+    }
+
+    &:hover {
+      background: $bg-secondary;
+    }
+
+    &.router-link-exact-active, &.active {
+      background: rgba($primary-color, 0.1);
+      color: $primary-color;
+    }
+  }
+
+  .sidebar-bottom {
+    padding: 16px;
+    border-top: 1px solid #e5e7eb;
+  }
+
+  .account-selector {
+    margin-bottom: 16px;
+    label {
+      display: block;
+      font-size: 12px;
+      color: $text-muted;
+      margin-bottom: 4px;
+    }
+  }
+
+  .user-info-panel {
+    .username {
+      font-weight: 500;
+    }
+    .role {
+      font-size: 12px;
+      color: $text-muted;
+    }
+  }
+}
+
+// 主内容区
+.main-content {
+  flex: 1;
+  margin-left: $sidebar-width;
+  padding: 24px;
+  min-height: 100vh;
+}
+
+// 卡片
+.card {
+  background: $bg-primary;
+  border-radius: $border-radius;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  margin-bottom: 20px;
+
+  .card-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid #e5e7eb;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    h3 {
+      font-size: 16px;
+      font-weight: 600;
+    }
+  }
+
+  .card-body {
+    padding: 20px;
+  }
+}
+
+// 统计卡片
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.stat-card {
+  background: $bg-primary;
+  border-radius: $border-radius;
+  padding: 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+
+  .stat-label {
+    font-size: 14px;
+    color: $text-muted;
+    margin-bottom: 8px;
+  }
+
+  .stat-value {
+    font-size: 24px;
+    font-weight: 600;
+  }
+
+  &.profit .stat-value { color: $danger-color; }
+  &.loss .stat-value { color: $success-color; }
+}
+
+// 表格
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+
+  th, td {
+    padding: 12px 16px;
+    text-align: left;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  th {
+    font-weight: 600;
+    color: $text-secondary;
+    background: $bg-secondary;
+  }
+
+  tbody tr:hover {
+    background: $bg-secondary;
+  }
+}
+
+// 按钮
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s;
+
+  &.btn-primary {
+    background: $primary-color;
+    color: white;
+    &:hover { background: darken($primary-color, 10%); }
+  }
+
+  &.btn-secondary {
+    background: $bg-secondary;
+    color: $text-primary;
+    border: 1px solid #d1d5db;
+    &:hover { background: darken($bg-secondary, 5%); }
+  }
+
+  &.btn-sm {
+    padding: 4px 12px;
+    font-size: 12px;
+  }
+}
+
+// 表单
+.form-input {
+  width: 100%;
+  padding: 10px 14px;
+  font-size: 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  transition: border-color 0.2s;
+
+  &:focus {
+    outline: none;
+    border-color: $primary-color;
+    box-shadow: 0 0 0 3px rgba($primary-color, 0.1);
+  }
+}
+
+.form-group {
+  margin-bottom: 16px;
+  label {
+    display: block;
+    font-size: 14px;
+    font-weight: 500;
+    margin-bottom: 6px;
+  }
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+// 页面头部
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+
+  h1 {
+    font-size: 24px;
+    font-weight: 600;
+  }
+}
+
+// Toast
+.toast-container {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 1000;
+}
+
+.toast {
+  padding: 12px 24px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  color: white;
+  animation: slideIn 0.3s ease;
+
+  &.success { background: $success-color; }
+  &.error { background: $danger-color; }
+  &.warning { background: $warning-color; color: $text-primary; }
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+// 移动端适配
+@media (max-width: 768px) {
+  .sidebar {
+    transform: translateX(-100%);
+
+    &.show {
+      transform: translateX(0);
+    }
+  }
+
+  .main-content {
+    margin-left: 0;
+  }
+
+  .mobile-header {
+    display: flex;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 60px;
+    background: $bg-primary;
+    border-bottom: 1px solid #e5e7eb;
+    align-items: center;
+    padding: 0 16px;
+    z-index: 99;
+
+    h1 {
+      flex: 1;
+      text-align: center;
+      font-size: 16px;
+    }
+  }
+
+  .sidebar-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+
+    &.show {
+      display: block;
+    }
+  }
+
+  .main-content {
+    padding-top: 80px;
+  }
+}
+
+@media (min-width: 769px) {
+  .mobile-header, .sidebar-overlay {
+    display: none;
+  }
+}

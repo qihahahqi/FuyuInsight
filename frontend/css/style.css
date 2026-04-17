@@ -274,6 +274,55 @@ body {
     color: var(--success-color);
 }
 
+/* 排序表头样式 */
+.data-table th.sortable {
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+}
+
+.data-table th.sortable:hover {
+    background: var(--bg-tertiary, #e8e8e8);
+}
+
+.data-table th.sortable .sort-icon {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-left: 4px;
+    opacity: 0.3;
+}
+
+.data-table th.sortable.asc .sort-icon::after,
+.data-table th.sortable.desc .sort-icon::after {
+    content: '';
+    display: inline-block;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+}
+
+.data-table th.sortable.asc .sort-icon::after {
+    border-bottom: 5px solid var(--primary-color);
+    opacity: 1;
+}
+
+.data-table th.sortable.desc .sort-icon::after {
+    border-top: 5px solid var(--primary-color);
+    opacity: 1;
+}
+
+.data-table th.sortable.asc,
+.data-table th.sortable.desc {
+    color: var(--primary-color);
+}
+
+.data-table th.sortable.asc .sort-icon,
+.data-table th.sortable.desc .sort-icon {
+    opacity: 1;
+}
+
 /* ==================== 按钮 ==================== */
 .btn {
     display: inline-flex;
@@ -306,6 +355,15 @@ body {
 
 .btn-secondary:hover {
     background: var(--border-color);
+}
+
+.btn-success {
+    background: #28a745;
+    color: white;
+}
+
+.btn-success:hover {
+    background: #218838;
 }
 
 .btn-danger {
@@ -384,7 +442,7 @@ body {
     display: none;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: 1100;  /* 普通模态框层级更高，确保在详情页之上 */
 }
 
 .modal-overlay.show {
@@ -514,6 +572,10 @@ body {
 
 .signal-item.add-position {
     border-left: 4px solid var(--warning-color);
+}
+
+.signal-item.normal {
+    border-left: 4px solid var(--border-color);
 }
 
 .signal-item .signal-title {
@@ -897,6 +959,89 @@ body {
 
 .ai-analysis-content em {
     color: var(--text-secondary);
+}
+
+/* AI 分析进度条样式 */
+.ai-progress-container {
+    background: var(--bg-secondary);
+    border-radius: var(--border-radius);
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.ai-progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.ai-progress-title {
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+.ai-progress-percentage {
+    color: var(--primary-color);
+    font-weight: 500;
+}
+
+.ai-progress-bar {
+    height: 8px;
+    background: var(--border-color);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.ai-progress-fill {
+    height: 100%;
+    background: var(--primary-color);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.ai-progress-current {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.ai-dimensions-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.ai-dimension-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border-radius: var(--border-radius-sm);
+    font-size: 13px;
+    background: var(--bg-secondary);
+}
+
+.ai-dimension-status.completed {
+    color: var(--success-color);
+}
+
+.ai-dimension-status.running {
+    color: var(--primary-color);
+    background: rgba(74, 144, 226, 0.1);
+}
+
+.ai-dimension-status.pending {
+    color: var(--text-secondary);
+}
+
+.ai-dimension-status.failed {
+    color: var(--danger-color);
+}
+
+.ai-task-cancel-btn {
+    margin-top: 12px;
 }
 
 /* ==================== 回测页面样式 ==================== */
@@ -1414,5 +1559,46 @@ input[type="date"]:focus {
 @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
+}
+
+/* 持仓详情模态框 - 层级低于普通模态框 */
+#position-detail-modal {
+    z-index: 1000;
+}
+
+/* ==================== 快捷比例按钮样式 ==================== */
+.quick-ratio-buttons {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.btn-outline {
+    background: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    padding: 4px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border-radius: var(--border-radius-sm);
+}
+
+.btn-outline:hover {
+    background: var(--primary-color);
+    color: white;
+    border-color: var(--primary-color);
+}
+
+.btn-outline.active {
+    background: var(--primary-light);
+    color: var(--primary-color);
+    border-color: var(--primary-color);
+}
+
+.btn-sm {
+    padding: 4px 12px;
+    font-size: 13px;
 }
 

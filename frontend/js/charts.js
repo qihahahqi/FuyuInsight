@@ -11,20 +11,23 @@ const Charts = {
     /**
      * 渲染收益曲线图
      */
-    async renderProfitCurve(canvasId, account_id = 1, days = 30) {
+    async renderProfitCurve(canvasId, account_id = null, days = 30) {
         const canvas = document.getElementById(canvasId);
         if (!canvas) return;
 
         try {
-            const response = await fetch(`/api/v1/charts/profit-curve?account_id=${account_id}&days=${days}`);
-            const result = await response.json();
-
-            if (!result.success || !result.data.labels.length) {
-                canvas.parentElement.innerHTML = '<div class="text-muted" style="text-align: center; padding: 40px;">暂无历史数据</div>';
-                return;
+            let url = `/api/v1/charts/profit-curve?days=${days}`;
+            if (account_id) {
+                url += `&account_id=${account_id}`;
             }
 
-            const data = result.data;
+            // 使用 utils.request 确保带认证 token
+            const data = await utils.request(url);
+
+            if (!data || !data.labels || data.labels.length === 0) {
+                canvas.parentElement.innerHTML = '<div class="text-muted" style="text-align: center; padding: 40px;">暂无历史数据<br><small>请先同步持仓价格</small></div>';
+                return;
+            }
 
             // 销毁旧图表
             if (this.profitChart) {
@@ -67,7 +70,7 @@ const Charts = {
                             beginAtZero: false,
                             ticks: {
                                 callback: function(value) {
-                                    return value + '%';
+                                    return value.toFixed(2) + '%';
                                 }
                             }
                         }
@@ -76,11 +79,12 @@ const Charts = {
             });
         } catch (error) {
             console.error('渲染收益曲线失败:', error);
+            canvas.parentElement.innerHTML = '<div class="text-muted" style="text-align: center; padding: 40px;">加载失败<br><small>' + error.message + '</small></div>';
         }
     },
 
     /**
-     * 渲染分布饼图
+     * 渲染分布饼图 - 显示每个持仓的分布
      */
     async renderDistribution(canvasId, account_id = null) {
         const canvas = document.getElementById(canvasId);
@@ -92,42 +96,44 @@ const Charts = {
                 url += `?account_id=${account_id}`;
             }
 
-            const response = await fetch(url);
-            const result = await response.json();
+            // 使用 utils.request 确保带认证 token
+            const data = await utils.request(url);
 
-            if (!result.success || !result.data.by_type || Object.keys(result.data.by_type).length === 0) {
+            if (!data || !data.by_position || data.by_position.length === 0) {
                 canvas.parentElement.innerHTML = '<div class="text-muted" style="text-align: center; padding: 40px;">暂无持仓数据</div>';
                 return;
             }
-
-            const data = result.data;
 
             // 销毁旧图表
             if (this.distributionChart) {
                 this.distributionChart.destroy();
             }
 
-            // 准备数据
-            const labels = {
-                'etf_index': '宽基ETF',
-                'etf_sector': '行业ETF',
-                'fund': '基金',
-                'stock': '股票'
-            };
+            // 使用具体持仓数据生成扇形图
+            const positions = data.by_position;
 
-            const chartLabels = Object.keys(data.by_type).map(k => labels[k] || k);
-            const chartData = Object.values(data.by_type).map(v => v.value);
-            const colors = ['#4A90E2', '#28A745', '#FFC107', '#DC3545', '#6C757D'];
+            // 生成颜色数组
+            const colors = [
+                '#4A90E2', '#28A745', '#FFC107', '#DC3545', '#6C757D',
+                '#17A2B8', '#6610F2', '#FD7E14', '#20C997', '#E83E8C',
+                '#6F42C1', '#007BFF', '#28A745', '#FFC107', '#DC3545'
+            ];
+
+            // 持仓名称作为标签
+            const chartLabels = positions.map(p => p.name || p.symbol);
+            const chartData = positions.map(p => p.value);
+            const chartPercentages = positions.map(p => p.percentage);
 
             // 创建新图表
             this.distributionChart = new Chart(canvas, {
-                type: 'doughnut',
+                type: 'pie',
                 data: {
                     labels: chartLabels,
                     datasets: [{
                         data: chartData,
-                        backgroundColor: colors,
-                        borderWidth: 0
+                        backgroundColor: colors.slice(0, positions.length),
+                        borderWidth: 2,
+                        borderColor: '#fff'
                     }]
                 },
                 options: {
@@ -135,14 +141,30 @@ const Charts = {
                     maintainAspectRatio: false,
                     plugins: {
                         legend: {
-                            position: 'bottom'
+                            position: 'right',
+                            labels: {
+                                boxWidth: 12,
+                                padding: 8,
+                                font: {
+                                    size: 11
+                                },
+                                generateLabels: function(chart) {
+                                    const chartData = chart.data;
+                                    return chartData.labels.map((label, i) => ({
+                                        text: `${label} (${chartPercentages[i]}%)`,
+                                        fillStyle: chartData.datasets[0].backgroundColor[i],
+                                        hidden: false,
+                                        index: i
+                                    }));
+                                }
+                            }
                         },
                         tooltip: {
                             callbacks: {
                                 label: function(context) {
-                                    const total = context.dataset.data.reduce((a, b) => a + b, 0);
-                                    const percentage = ((context.raw / total) * 100).toFixed(1);
-                                    return `${context.label}: ${utils.formatMoney(context.raw)} (${percentage}%)`;
+                                    const value = context.raw;
+                                    const percentage = chartPercentages[context.dataIndex];
+                                    return `${context.label}: ${utils.formatMoney(value)} (${percentage}%)`;
                                 }
                             }
                         }
@@ -151,13 +173,14 @@ const Charts = {
             });
         } catch (error) {
             console.error('渲染分布图失败:', error);
+            canvas.parentElement.innerHTML = '<div class="text-muted" style="text-align: center; padding: 40px;">加载失败<br><small>' + error.message + '</small></div>';
         }
     },
 
     /**
      * 刷新所有图表
      */
-    async refreshAll(account_id = 1) {
+    async refreshAll(account_id = null) {
         await Promise.all([
             this.renderProfitCurve('profit-chart', account_id),
             this.renderDistribution('distribution-chart', account_id)

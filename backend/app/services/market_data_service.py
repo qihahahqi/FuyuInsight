@@ -407,7 +407,11 @@ class MarketDataService:
 
                     if records:
                         logger.info(f"从数据库读取 {fund_code} 基金净值 {len(records)} 条")
-                        return self._price_history_to_df(records)
+                        df = self._price_history_to_df(records)
+                        # 确保基金数据有 nav 字段
+                        if 'nav' not in df.columns and 'close' in df.columns:
+                            df['nav'] = df['close']
+                        return df
 
                 # 只获取缺失的日期范围
                 if max_date < end_dt:
@@ -425,44 +429,85 @@ class MarketDataService:
 
         if not df.empty and user_id:
             self._save_fund_nav_history(user_id, fund_code, df)
+            # 确保基金数据有 nav 字段
+            if 'nav' not in df.columns and 'close' in df.columns:
+                df['nav'] = df['close']
 
         return df
 
     def _fetch_fund_nav_from_api(self, fund_code: str, start_date: str, end_date: str,
                                   user_id: int = None) -> pd.DataFrame:
-        """从API获取基金净值历史（按优先级尝试各数据源）"""
+        """从API获取基金净值历史（按优先级尝试各数据源）
+
+        优先级：用户配置 > AKShare > 天天基金
+        """
         config = self.get_user_fund_datasource_config(user_id) if user_id else {}
         self._rate_limit()
 
-        # 1. 尝试天天基金
-        try:
-            from .eastmoney_fund_service import get_eastmoney_fund_service
-            service = get_eastmoney_fund_service()
-            df = service.get_fund_nav_history(fund_code, start_date, end_date)
-            if not df.empty:
-                logger.info(f"天天基金获取 {fund_code} 净值历史 {len(df)} 条")
-                return df
-        except Exception as e:
-            logger.warning(f"天天基金获取净值历史失败: {str(e)}")
+        datasource_type = config.get('type', 'default')
 
-        # 2. 尝试 AKShare（备用）
-        try:
-            import akshare as ak
-            df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
-            if df is not None and len(df) > 0:
-                df = df.rename(columns={
-                    '净值日期': 'date',
-                    '单位净值': 'nav',
-                    '日增长率': 'change_pct'
-                })
-                if 'date' in df.columns:
-                    df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
-                    # 过滤日期范围
-                    df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
-                    logger.info(f"AKShare 获取 {fund_code} 净值历史 {len(df)} 条")
+        # 根据用户配置的数据源类型决定优先级
+        if datasource_type == 'eastmoney':
+            # 用户选择优先天天基金
+            # 1. 尝试天天基金
+            try:
+                from .eastmoney_fund_service import get_eastmoney_fund_service
+                service = get_eastmoney_fund_service()
+                df = service.get_fund_nav_history(fund_code, start_date, end_date)
+                if not df.empty:
+                    logger.info(f"天天基金获取 {fund_code} 净值历史 {len(df)} 条")
                     return df
-        except Exception as e:
-            logger.warning(f"AKShare 获取基金净值失败: {str(e)}")
+            except Exception as e:
+                logger.warning(f"天天基金获取净值历史失败: {str(e)}")
+
+            # 2. 降级到 AKShare
+            try:
+                import akshare as ak
+                df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+                if df is not None and len(df) > 0:
+                    df = df.rename(columns={
+                        '净值日期': 'date',
+                        '单位净值': 'nav',
+                        '日增长率': 'change_pct'
+                    })
+                    if 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+                        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+                        logger.info(f"AKShare 获取 {fund_code} 净值历史 {len(df)} 条")
+                        return df
+            except Exception as e:
+                logger.warning(f"AKShare 获取基金净值失败: {str(e)}")
+
+        else:
+            # 默认或用户选择优先 AKShare
+            # 1. 尝试 AKShare
+            try:
+                import akshare as ak
+                df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+                if df is not None and len(df) > 0:
+                    df = df.rename(columns={
+                        '净值日期': 'date',
+                        '单位净值': 'nav',
+                        '日增长率': 'change_pct'
+                    })
+                    if 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+                        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+                        logger.info(f"AKShare 获取 {fund_code} 净值历史 {len(df)} 条")
+                        return df
+            except Exception as e:
+                logger.warning(f"AKShare 获取基金净值失败: {str(e)}")
+
+            # 2. 降级到天天基金
+            try:
+                from .eastmoney_fund_service import get_eastmoney_fund_service
+                service = get_eastmoney_fund_service()
+                df = service.get_fund_nav_history(fund_code, start_date, end_date)
+                if not df.empty:
+                    logger.info(f"天天基金获取 {fund_code} 净值历史 {len(df)} 条")
+                    return df
+            except Exception as e:
+                logger.warning(f"天天基金获取净值历史失败: {str(e)}")
 
         return pd.DataFrame()
 
@@ -505,51 +550,128 @@ class MarketDataService:
     # ============ 持仓数据同步 ============
 
     def sync_position_prices(self, user_id: int) -> Dict[str, Any]:
-        """同步用户持仓的最新价格"""
+        """同步用户持仓的最新价格，并更新市值和收益率，同时获取近一周历史数据"""
         from ..models import Position
         from .. import db
 
-        positions = Position.query.filter_by(user_id=user_id).all()
+        positions = Position.query.filter_by(user_id=user_id).filter(Position.quantity > 0).all()
 
         if not positions:
             return {"success": True, "message": "无持仓数据", "updated": 0}
 
         stock_symbols = []
         fund_codes = []
+        etf_symbols = []
 
         for p in positions:
-            if p.asset_type in ['stock', 'etf_index', 'etf_sector']:
+            if p.asset_type in ['stock']:
                 stock_symbols.append(p.symbol)
             elif p.asset_type == 'fund':
                 fund_codes.append(p.symbol)
+            elif p.asset_type in ['etf_index', 'etf_sector']:
+                etf_symbols.append(p.symbol)
 
         updated = 0
+        errors = []
+        price_data = {}  # 用于存储所有价格数据
 
+        # 获取股票价格
         if stock_symbols:
-            stock_prices = self.get_stock_realtime(stock_symbols, user_id)
-            for position in positions:
-                if position.symbol in stock_prices:
-                    data = stock_prices[position.symbol]
-                    position.current_price = data.get('price') or data.get('nav')
-                    updated += 1
+            try:
+                stock_prices = self.get_stock_realtime(stock_symbols, user_id)
+                price_data.update(stock_prices)
+            except Exception as e:
+                errors.append(f"获取股票价格失败: {str(e)}")
 
+        # 获取基金净值
         if fund_codes:
-            fund_navs = self.get_fund_realtime(fund_codes, user_id)
-            for position in positions:
-                if position.symbol in fund_navs:
-                    data = fund_navs[position.symbol]
-                    position.current_price = data.get('nav') or data.get('dwjz')
-                    updated += 1
+            try:
+                fund_navs = self.get_fund_realtime(fund_codes, user_id)
+                price_data.update(fund_navs)
+            except Exception as e:
+                errors.append(f"获取基金净值失败: {str(e)}")
+
+        # 获取ETF价格（使用股票接口）
+        if etf_symbols:
+            try:
+                etf_prices = self.get_stock_realtime(etf_symbols, user_id)
+                price_data.update(etf_prices)
+            except Exception as e:
+                errors.append(f"获取ETF价格失败: {str(e)}")
+
+        # 更新持仓数据
+        for position in positions:
+            if position.symbol in price_data:
+                data = price_data[position.symbol]
+
+                # 获取新价格
+                new_price = data.get('price') or data.get('nav') or data.get('dwjz')
+                if new_price is None:
+                    continue
+
+                # 更新当前价格
+                position.current_price = float(new_price)
+
+                # 更新市值
+                position.market_value = position.quantity * float(new_price)
+
+                # 更新收益率
+                if position.cost_price and float(position.cost_price) > 0:
+                    position.profit_rate = (float(new_price) - float(position.cost_price)) / float(position.cost_price)
+
+                updated += 1
+                logger.info(f"更新 {position.symbol} ({position.name}): 价格={new_price}, 市值={position.market_value}, 收益率={position.profit_rate:.2%}")
 
         db.session.commit()
 
+        # 获取近一周历史数据（用于收益曲线计算）
+        history_updated = 0
+        try:
+            from datetime import datetime, timedelta
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+
+            for position in positions:
+                try:
+                    if position.asset_type in ['stock', 'etf_index', 'etf_sector']:
+                        df = self.get_stock_history(position.symbol, start_date, end_date, user_id)
+                        if not df.empty:
+                            history_updated += len(df)
+                    elif position.asset_type == 'fund':
+                        df = self.get_fund_nav_history(position.symbol, start_date, end_date, user_id)
+                        if not df.empty:
+                            history_updated += len(df)
+                except Exception as e:
+                    logger.warning(f"获取 {position.symbol} 近一周历史数据失败: {str(e)}")
+
+        except Exception as e:
+            logger.warning(f"获取近一周历史数据失败: {str(e)}")
+
+        # 创建今日快照
+        try:
+            from .snapshot_service import SnapshotService
+            snapshot_service = SnapshotService()
+
+            # 获取用户的账户列表
+            from ..models import Account
+            accounts = Account.query.filter_by(user_id=user_id, is_active=True).all()
+
+            for account in accounts:
+                snapshot_service.create_daily_snapshot(account.id, user_id)
+
+        except Exception as e:
+            logger.warning(f"创建快照失败: {str(e)}")
+
         return {
             "success": True,
-            "message": f"成功更新 {updated} 条持仓价格",
+            "message": f"成功更新 {updated} 条持仓价格和市值，获取 {history_updated} 条历史数据",
             "updated": updated,
+            "history_updated": history_updated,
             "total": len(positions),
             "stocks": len(stock_symbols),
-            "funds": len(fund_codes)
+            "funds": len(fund_codes),
+            "etfs": len(etf_symbols),
+            "errors": errors
         }
 
     def fetch_position_history(self, user_id: int, years: int = 5) -> Dict[str, Any]:
@@ -699,14 +821,27 @@ class MarketDataService:
         """将数据库记录转换为DataFrame"""
         data = []
         for r in records:
-            data.append({
+            record = {
                 'date': r.trade_date.strftime('%Y-%m-%d') if r.trade_date else None,
-                'open': float(r.open_price) if r.open_price else None,
-                'high': float(r.high_price) if r.high_price else None,
-                'low': float(r.low_price) if r.low_price else None,
-                'close': float(r.close_price) if r.close_price else None,
                 'volume': float(r.volume) if r.volume else None
-            })
+            }
+            # 对于基金，使用 nav 字段作为主要价格字段
+            if r.asset_type == 'fund':
+                if r.close_price:
+                    record['nav'] = float(r.close_price)
+                    record['close'] = float(r.close_price)  # 同时提供 close 以便回测使用
+            else:
+                # 股票数据
+                record['open'] = float(r.open_price) if r.open_price else None
+                record['high'] = float(r.high_price) if r.high_price else None
+                record['low'] = float(r.low_price) if r.low_price else None
+                record['close'] = float(r.close_price) if r.close_price else None
+
+            if r.acc_nav:
+                record['acc_nav'] = float(r.acc_nav)
+            if r.change_pct:
+                record['change_pct'] = float(r.change_pct)
+            data.append(record)
         return pd.DataFrame(data)
 
     def _merge_db_and_new_data(self, user_id: int, symbol: str,
@@ -761,8 +896,18 @@ class MarketDataService:
                 'current': fund_config.get('type', 'default'),
                 'sources': {
                     'default': {
-                        'name': '天天基金 + AKShare',
+                        'name': 'AKShare + 天天基金',
                         'description': '免费数据源，自动降级',
+                        'status': 'available'
+                    },
+                    'akshare': {
+                        'name': 'AKShare',
+                        'description': '优先使用AKShare',
+                        'status': 'available'
+                    },
+                    'eastmoney': {
+                        'name': '天天基金',
+                        'description': '优先使用天天基金',
                         'status': 'available'
                     },
                     'tushare': {

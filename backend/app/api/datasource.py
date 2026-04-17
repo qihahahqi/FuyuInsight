@@ -13,10 +13,24 @@ from ..utils import success_response, error_response
 from ..utils.decorators import login_required, get_current_user
 from ..services import get_market_data_service
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
 datasource_bp = Blueprint('datasource', __name__)
+
+
+def clean_nan_values(obj):
+    """递归地将 NaN 和 Infinity 值转换为 None（JSON 兼容）"""
+    if isinstance(obj, dict):
+        return {k: clean_nan_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nan_values(item) for item in obj]
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    return obj
 
 
 # ============ 数据源状态 ============
@@ -116,11 +130,11 @@ def get_stock_history(symbol):
                 'message': '未获取到数据'
             })
 
-        return success_response({
+        return success_response(clean_nan_values({
             'symbol': symbol,
             'data': df.to_dict('records'),
             'count': len(df)
-        })
+        }))
     except Exception as e:
         logger.error(f"获取股票历史数据失败: {str(e)}")
         return error_response(str(e))
@@ -199,11 +213,11 @@ def get_fund_history(fund_code):
                 'message': '未获取到数据'
             })
 
-        return success_response({
+        return success_response(clean_nan_values({
             'fund_code': fund_code,
             'data': df.to_dict('records'),
             'count': len(df)
-        })
+        }))
     except Exception as e:
         logger.error(f"获取基金净值历史失败: {str(e)}")
         return error_response(str(e))
@@ -251,7 +265,7 @@ def sync_prices():
 @datasource_bp.route('/fetch-history', methods=['POST'])
 @login_required
 def fetch_history():
-    """获取所有持仓历史数据"""
+    """获取所有持仓历史数据（同步方式，一次性获取）"""
     try:
         user = get_current_user()
         data = request.get_json() or {}
@@ -263,6 +277,58 @@ def fetch_history():
         return success_response(result)
     except Exception as e:
         logger.error(f"获取历史数据失败: {str(e)}")
+        return error_response(str(e))
+
+
+@datasource_bp.route('/fetch-history/background', methods=['POST'])
+@login_required
+def start_background_fetch():
+    """启动后台历史数据获取任务（分批获取，防止接口频繁访问）"""
+    try:
+        from flask import current_app
+        from ..services.history_fetch_service import history_fetch_service
+
+        user = get_current_user()
+        data = request.get_json() or {}
+        years = data.get('years', 10)
+
+        result = history_fetch_service.start_fetch(current_app._get_current_object(), user.id, years)
+
+        return success_response(result)
+    except Exception as e:
+        logger.error(f"启动后台获取失败: {str(e)}")
+        return error_response(str(e))
+
+
+@datasource_bp.route('/fetch-history/progress', methods=['GET'])
+@login_required
+def get_fetch_progress():
+    """获取历史数据获取进度"""
+    try:
+        from ..services.history_fetch_service import history_fetch_service
+
+        user = get_current_user()
+        progress = history_fetch_service.get_progress(user.id)
+
+        return success_response(progress)
+    except Exception as e:
+        logger.error(f"获取进度失败: {str(e)}")
+        return error_response(str(e))
+
+
+@datasource_bp.route('/fetch-history/stop', methods=['POST'])
+@login_required
+def stop_fetch():
+    """停止历史数据获取任务"""
+    try:
+        from ..services.history_fetch_service import history_fetch_service
+
+        user = get_current_user()
+        history_fetch_service.stop_fetch(user.id)
+
+        return success_response({'message': '已停止获取任务'})
+    except Exception as e:
+        logger.error(f"停止任务失败: {str(e)}")
         return error_response(str(e))
 
 
@@ -292,11 +358,11 @@ def get_index_history(symbol):
                 'message': '未获取到数据'
             })
 
-        return success_response({
+        return success_response(clean_nan_values({
             'symbol': symbol,
             'data': df.to_dict('records'),
             'count': len(df)
-        })
+        }))
     except Exception as e:
         logger.error(f"获取指数数据失败: {str(e)}")
         return error_response(str(e))

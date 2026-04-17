@@ -7,10 +7,21 @@ Flask 应用工厂
 from flask import Flask
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import yaml
 import os
+import logging
 
 db = SQLAlchemy()
+migrate = Migrate()
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"
+)
+logger = logging.getLogger(__name__)
 
 
 def load_config():
@@ -51,14 +62,24 @@ def create_app(config=None):
              f"{db_config.get('database', 'myapp')}?charset={db_config.get('charset', 'utf8mb4')}"
     app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    app.config['SQLALCHEMY_ECHO'] = config.get('server', {}).get('debug', False)
+    # 生产模式下不显示 SQL 日志
+    app.config['SQLALCHEMY_ECHO'] = False
 
     # 存储配置到 app.config
     app.config['APP_CONFIG'] = config
 
     # 初始化扩展
     db.init_app(app)
-    CORS(app)
+    migrate.init_app(app, db, directory='migrations/alembic')
+    limiter.init_app(app)
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": "*",
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "supports_credentials": True
+        }
+    })
 
     # 注册蓝图
     from .api.auth import auth_bp
@@ -94,5 +115,17 @@ def create_app(config=None):
     def index():
         from flask import send_from_directory
         return send_from_directory('../../frontend', 'index.html')
+
+    # 初始化定时任务调度器
+    try:
+        from .services.scheduler_service import init_scheduler
+        init_scheduler(app)
+        logger.info("定时任务调度器启动成功")
+    except Exception as e:
+        logger.warning(f"定时任务调度器启动失败: {str(e)}")
+
+    # 初始化日志中间件（请求日志）
+    from .utils.logging import init_request_logging
+    init_request_logging(app)
 
     return app

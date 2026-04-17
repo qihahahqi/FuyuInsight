@@ -56,7 +56,7 @@ def login_required(f):
                 'success': False,
                 'message': '认证令牌已过期'
             }), 401
-        except jwt.InvalidTokenError:
+        except jwt.InvalidTokenError as e:
             return jsonify({
                 'success': False,
                 'message': '无效的认证令牌'

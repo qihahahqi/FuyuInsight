@@ -175,8 +175,8 @@
                                         <th>数量</th>
                                         <th>成本价</th>
                                         <th>现价</th>
-                                        <th>市值</th>
-                                        <th>收益率</th>
+                                        <th class="sortable" onclick="sortPositions('market_value')">市值 <span class="sort-icon"></span></th>
+                                        <th class="sortable" onclick="sortPositions('profit_rate')">收益率 <span class="sort-icon"></span></th>
                                         <th>操作</th>
                                     </tr>
                                 </thead>
@@ -211,9 +211,9 @@
                                         <th>数量</th>
                                         <th>成本价</th>
                                         <th>现价</th>
-                                        <th>总成本</th>
-                                        <th>市值</th>
-                                        <th>收益率</th>
+                                        <th class="sortable" onclick="sortPositionsFull('total_cost')">总成本 <span class="sort-icon"></span></th>
+                                        <th class="sortable" onclick="sortPositionsFull('market_value')">市值 <span class="sort-icon"></span></th>
+                                        <th class="sortable" onclick="sortPositionsFull('profit_rate')">收益率 <span class="sort-icon"></span></th>
                                         <th>操作</th>
                                     </tr>
                                 </thead>
@@ -297,7 +297,13 @@
             <div id="page-valuation" class="page">
                 <div class="page-header">
                     <h1>估值判断</h1>
-                    <button class="btn btn-primary" onclick="showValuationModal()">录入估值</button>
+                    <div style="display: flex; gap: 10px;">
+                        <button class="btn btn-primary" onclick="showValuationModal()">录入估值</button>
+                        <button class="btn btn-secondary" onclick="downloadValuationTemplate()">下载模板</button>
+                        <button class="btn btn-secondary" onclick="document.getElementById('valuation-import-file').click()">导入数据</button>
+                        <button class="btn btn-secondary" onclick="exportValuations()">导出数据</button>
+                    </div>
+                    <input type="file" id="valuation-import-file" style="display: none;" accept=".xlsx,.xls,.csv">
                 </div>
 
                 <div class="card">
@@ -341,90 +347,25 @@
                     <h1>策略回测</h1>
                 </div>
 
-                <!-- 数据获取 -->
+                <!-- 回测结果 & 历史 -->
                 <div class="card">
                     <div class="card-header">
-                        <h3>数据获取</h3>
+                        <h3>回测结果</h3>
                     </div>
                     <div class="card-body">
-                        <!-- 数据源选择 -->
-                        <div class="form-group">
-                            <label>数据源</label>
-                            <div style="display: flex; gap: 10px; align-items: center;">
-                                <select id="backtest-data-source" class="form-input" style="width: 200px;" onchange="toggleDataSourceOptions()">
-                                    <option value="akshare">AKShare (免费)</option>
-                                    <option value="baostock">BaoStock (免费)</option>
-                                    <option value="local">本地/数据库数据</option>
-                                    <option value="tushare">Tushare Pro</option>
-                                </select>
-                                <span id="ds-status" class="signal-badge"></span>
-                            </div>
+                        <!-- Tab 切换 -->
+                        <div class="backtest-tabs" style="display: flex; gap: 8px; margin-bottom: 16px;">
+                            <button class="btn btn-secondary active" id="bt-tab-result" onclick="switchBacktestTab('result')">当前结果</button>
+                            <button class="btn btn-secondary" id="bt-tab-history" onclick="switchBacktestTab('history')">历史记录</button>
                         </div>
-
-                        <!-- 在线数据获取（AKShare/BaoStock/Tushare） -->
-                        <div id="online-fetch-section">
-                            <div class="form-grid">
-                                <div class="form-group">
-                                    <label>股票代码</label>
-                                    <input type="text" id="backtest-stock-symbol" placeholder="如: 601168" class="form-input">
-                                </div>
-                                <div class="form-group">
-                                    <label>股票名称</label>
-                                    <input type="text" id="backtest-stock-name" placeholder="如: 西部矿业" class="form-input">
-                                </div>
-                            </div>
-                            <div class="form-group">
-                                <label>日期范围</label>
-                                <div class="time-range-selector" style="margin-bottom: 8px;">
-                                    <button class="time-btn" data-range="1m">1月</button>
-                                    <button class="time-btn" data-range="3m">3月</button>
-                                    <button class="time-btn active" data-range="6m">6月</button>
-                                    <button class="time-btn" data-range="1y">1年</button>
-                                    <button class="time-btn" data-range="2y">2年</button>
-                                    <button class="time-btn" data-range="3y">3年</button>
-                                    <button class="time-btn" data-range="5y">5年</button>
-                                </div>
-                            </div>
-                            <div class="date-range-picker">
-                                <div class="date-picker-group">
-                                    <label>开始日期</label>
-                                    <input type="date" id="backtest-fetch-start" class="form-input">
-                                </div>
-                                <span class="date-separator">至</span>
-                                <div class="date-picker-group">
-                                    <label>结束日期</label>
-                                    <input type="date" id="backtest-fetch-end" class="form-input">
-                                </div>
-                            </div>
-                            <div class="form-actions" style="margin-top: 12px;">
-                                <button class="btn btn-primary" onclick="fetchOnlineData()">获取数据</button>
-                            </div>
-                            <div id="fetch-result" style="margin-top: 10px;"></div>
+                        <!-- 当前结果 -->
+                        <div id="backtest-result-container">
+                            <div id="backtest-result"></div>
                         </div>
-
-                        <!-- 本地导入 -->
-                        <div id="local-import-section" style="display: none;">
-                            <div class="form-group">
-                                <label>选择数据文件 (Excel/CSV)</label>
-                                <div style="display: flex; gap: 10px; align-items: center;">
-                                    <input type="file" id="import-file" accept=".xlsx,.xls,.csv" class="form-input" style="flex: 1;">
-                                    <button class="btn btn-secondary" onclick="downloadBacktestTemplate()">下载模板</button>
-                                    <button class="btn btn-primary" onclick="importPriceData()">导入数据</button>
-                                </div>
-                            </div>
+                        <!-- 历史记录 -->
+                        <div id="backtest-history-container" style="display: none;">
+                            <div id="backtest-history-list"></div>
                         </div>
-
-                        <div id="import-result" style="margin-top: 10px;"></div>
-                    </div>
-                </div>
-
-                <!-- 已导入数据列表 -->
-                <div class="card">
-                    <div class="card-header">
-                        <h3>已导入数据</h3>
-                    </div>
-                    <div class="card-body">
-                        <div id="imported-data-list"></div>
                     </div>
                 </div>
 
@@ -552,13 +493,119 @@
                     </div>
                 </div>
 
-                <!-- 回测结果 -->
+                <!-- 数据获取（移到下方） -->
                 <div class="card">
                     <div class="card-header">
-                        <h3>回测结果</h3>
+                        <h3>数据获取</h3>
                     </div>
                     <div class="card-body">
-                        <div id="backtest-result"></div>
+                        <!-- 资产类型选择 -->
+                        <div class="form-group">
+                            <label>资产类型</label>
+                            <div style="display: flex; gap: 10px;">
+                                <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                                    <input type="radio" name="backtest-asset-type" value="stock" checked onchange="toggleAssetType()">
+                                    <span>股票/ETF</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                                    <input type="radio" name="backtest-asset-type" value="fund" onchange="toggleAssetType()">
+                                    <span>基金</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- 数据源选择 -->
+                        <div class="form-group" id="stock-datasource-section">
+                            <label>数据源</label>
+                            <div style="display: flex; gap: 10px; align-items: center;">
+                                <select id="backtest-data-source" class="form-input" style="width: 200px;" onchange="toggleDataSourceOptions()">
+                                    <option value="akshare">AKShare (免费)</option>
+                                    <option value="baostock">BaoStock (免费)</option>
+                                    <option value="local">本地/数据库数据</option>
+                                    <option value="tushare">Tushare Pro</option>
+                                </select>
+                                <span id="ds-status" class="signal-badge"></span>
+                            </div>
+                        </div>
+
+                        <!-- 在线数据获取（股票） -->
+                        <div id="online-fetch-section">
+                            <!-- 快速选择 -->
+                            <div class="form-group">
+                                <label id="quick-select-label">快速选择股票</label>
+                                <div style="display: flex; gap: 10px; align-items: center;">
+                                    <select id="quick-select-symbol" class="form-input" style="flex: 1;" onchange="onQuickSelectChange()">
+                                        <option value="">-- 从已有数据中选择或手动输入 --</option>
+                                    </select>
+                                    <button class="btn btn-secondary btn-sm" onclick="clearQuickSelect()" title="清空选择">清空</button>
+                                </div>
+                                <small class="text-muted" style="display: block; margin-top: 4px;">
+                                    可从已有持仓和历史数据中快速选择，也可手动输入
+                                </small>
+                            </div>
+
+                            <div class="form-grid">
+                                <div class="form-group">
+                                    <label id="symbol-label">股票代码</label>
+                                    <input type="text" id="backtest-stock-symbol" placeholder="如: 601168" class="form-input" oninput="onSymbolInput()">
+                                </div>
+                                <div class="form-group">
+                                    <label id="name-label">股票名称</label>
+                                    <input type="text" id="backtest-stock-name" placeholder="如: 西部矿业" class="form-input">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>日期范围</label>
+                                <div class="time-range-selector" style="margin-bottom: 8px;">
+                                    <button class="time-btn" data-range="1m">1月</button>
+                                    <button class="time-btn" data-range="3m">3月</button>
+                                    <button class="time-btn active" data-range="6m">6月</button>
+                                    <button class="time-btn" data-range="1y">1年</button>
+                                    <button class="time-btn" data-range="2y">2年</button>
+                                    <button class="time-btn" data-range="3y">3年</button>
+                                    <button class="time-btn" data-range="5y">5年</button>
+                                </div>
+                            </div>
+                            <div class="date-range-picker">
+                                <div class="date-picker-group">
+                                    <label>开始日期</label>
+                                    <input type="date" id="backtest-fetch-start" class="form-input">
+                                </div>
+                                <span class="date-separator">至</span>
+                                <div class="date-picker-group">
+                                    <label>结束日期</label>
+                                    <input type="date" id="backtest-fetch-end" class="form-input">
+                                </div>
+                            </div>
+                            <div class="form-actions" style="margin-top: 12px;">
+                                <button class="btn btn-primary" onclick="fetchOnlineData()">获取数据</button>
+                            </div>
+                            <div id="fetch-result" style="margin-top: 10px;"></div>
+                        </div>
+
+                        <!-- 本地导入 -->
+                        <div id="local-import-section" style="display: none;">
+                            <div class="form-group">
+                                <label>选择数据文件 (Excel/CSV)</label>
+                                <div style="display: flex; gap: 10px; align-items: center;">
+                                    <input type="file" id="import-file" accept=".xlsx,.xls,.csv" class="form-input" style="flex: 1;">
+                                    <button class="btn btn-secondary" onclick="downloadBacktestTemplate()">下载模板</button>
+                                    <button class="btn btn-primary" onclick="importPriceData()">导入数据</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="import-result" style="margin-top: 10px;"></div>
+                    </div>
+                </div>
+
+                <!-- 已导入数据列表 -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3>已导入数据</h3>
+                    </div>
+                    <div class="card-body">
+                        <div id="imported-data-list"></div>
                     </div>
                 </div>
             </div>
@@ -687,6 +734,19 @@
                         <h3>分析结果</h3>
                     </div>
                     <div class="card-body">
+                        <!-- 进度显示 -->
+                        <div id="ai-progress-container" class="ai-progress-container" style="display: none;">
+                            <div class="ai-progress-header">
+                                <span class="ai-progress-title">分析进度</span>
+                                <span class="ai-progress-percentage" id="ai-progress-percent">0%</span>
+                            </div>
+                            <div class="ai-progress-bar">
+                                <div class="ai-progress-fill" id="ai-progress-fill" style="width: 0%;"></div>
+                            </div>
+                            <div class="ai-progress-current" id="ai-progress-current"></div>
+                            <div class="ai-dimensions-status" id="ai-dimensions-status"></div>
+                            <button class="btn btn-danger btn-sm ai-task-cancel-btn" id="ai-cancel-btn" onclick="cancelAIAnalysisTask()" style="display: none;">取消分析</button>
+                        </div>
                         <!-- Tab切换 -->
                         <div id="ai-result-tabs" class="ai-tabs" style="display: none;">
                             <div class="ai-tabs-header" id="ai-tabs-header"></div>
@@ -887,21 +947,23 @@
                             <div style="display: flex; justify-content: space-between; align-items: center;">
                                 <div>
                                     <strong>当前数据源：</strong>
-                                    <span id="fund-datasource-tag" class="tag" style="background: #17a2b8;">天天基金</span>
+                                    <span id="fund-datasource-tag" class="tag" style="background: #17a2b8;">AKShare + 天天基金</span>
                                 </div>
                                 <button class="btn btn-sm btn-secondary" onclick="testFundDatasource()">测试连接</button>
                             </div>
                             <small class="text-muted" style="display: block; margin-top: 8px;">
-                                默认使用天天基金获取基金净值数据，失败自动降级到 AKShare。配置 Tushare 后优先使用用户接口。
+                                默认优先使用 AKShare 获取基金数据，失败自动降级到天天基金。数据源支持自动切换，保证数据获取成功率。
                             </small>
                         </div>
 
-                        <!-- Tushare 配置 -->
+                        <!-- 数据源配置 -->
                         <div class="form-grid">
                             <div class="form-group">
                                 <label>数据源类型</label>
                                 <select id="fund-datasource-type" class="form-input">
-                                    <option value="default">默认（天天基金免费源）</option>
+                                    <option value="default">默认（AKShare + 天天基金，自动切换）</option>
+                                    <option value="akshare">AKShare（优先AKShare）</option>
+                                    <option value="eastmoney">天天基金（优先天天基金）</option>
                                     <option value="tushare">Tushare Pro（需配置Token）</option>
                                 </select>
                             </div>

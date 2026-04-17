@@ -49,7 +49,7 @@ def get_trades():
 @trades_bp.route('/trades', methods=['POST'])
 @login_required
 def create_trade():
-    """创建交易记录"""
+    """创建交易记录，并更新止盈/加仓状态"""
     try:
         user = get_current_user()
         data = request.get_json()
@@ -64,7 +64,15 @@ def create_trade():
         if data['trade_type'] not in ['buy', 'sell']:
             return error_response("交易类型必须是 buy 或 sell")
 
-        quantity = int(data['quantity'])
+        # 根据资产类型决定数量解析方式
+        asset_type = data.get('asset_type', 'stock')
+        if asset_type in ['stock', 'etf_index', 'etf_sector']:
+            quantity = int(data['quantity'])
+        else:
+            # 基金等允许小数份额，保留两位小数
+            quantity = float(data['quantity'])
+            quantity = int(quantity * 100) / 100  # 保留两位小数
+
         price = float(data['price'])
         amount = quantity * price
 
@@ -73,6 +81,7 @@ def create_trade():
 
         trade = Trade(
             user_id=user.id,
+            account_id=data.get('account_id'),
             position_id=position.id if position else None,
             symbol=data['symbol'],
             trade_type=data['trade_type'],
@@ -96,13 +105,51 @@ def create_trade():
                 position.cost_price = total_cost / total_quantity
                 position.quantity = total_quantity
                 position.total_cost = total_cost
+
+                # 更新加仓比例（如果是加仓信号）
+                signal_type = data.get('signal_type')
+                if signal_type and signal_type.startswith('add_position'):
+                    try:
+                        # 从信号类型中提取加仓比例（如 add_position_10 表示加仓10%）
+                        ratio_str = signal_type.split('_')[-1]
+                        add_ratio = float(ratio_str) / 100
+                        current_ratio = float(position.add_position_ratio) if position.add_position_ratio else 0
+                        position.add_position_ratio = current_ratio + add_ratio
+                    except (ValueError, IndexError):
+                        pass
             else:
                 # 卖出：减少数量
                 position.quantity -= quantity
                 position.total_cost = float(position.total_cost) - float(position.cost_price) * quantity
 
-        db.session.commit()
+                # 更新止盈触发状态（如果是止盈信号）
+                signal_type = data.get('signal_type')
+                if signal_type and signal_type.startswith('stop_profit'):
+                    try:
+                        # 根据信号类型更新对应档位状态
+                        # stop_profit_1 -> 第一档已触发
+                        # stop_profit_2 -> 第二档已触发
+                        # stop_profit_3 -> 第三档已触发
+                        level = int(signal_type.split('_')[-1])  # 1, 2, 3
+                        status = position.stop_profit_status  # 使用属性 getter
+                        if level <= len(status):
+                            status[level - 1] = True
+                            position.stop_profit_status = status  # 使用属性 setter
+                    except (ValueError, IndexError):
+                        pass
 
+                # 如果卖出后数量为0，重置所有状态
+                if position.quantity <= 0:
+                    position.quantity = 0
+                    position.total_cost = 0
+                    position.market_value = 0
+                    position.profit_rate = 0
+                    position.current_price = None
+                    # 重置止盈和加仓状态
+                    position.stop_profit_status = [False, False, False]
+                    position.add_position_ratio = 0
+
+        db.session.commit()
         return success_response(trade.to_dict(), "交易记录创建成功")
     except Exception as e:
         db.session.rollback()

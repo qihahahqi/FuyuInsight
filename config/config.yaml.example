@@ -1,0 +1,70 @@
+# 投资理财管理系统配置文件模板
+# 复制此文件为 config.yaml 并修改相应配置
+
+server:
+  host: "0.0.0.0"
+  port: 5001
+  debug: false  # 生产环境请设置为 false
+
+database:
+  host: "localhost"
+  port: 3306
+  database: "myapp"           # 数据库名称
+  user: "your_username"       # 修改为你的数据库用户名
+  password: "your_password"   # 修改为你的数据库密码
+  charset: "utf8mb4"
+
+# 策略参数配置
+strategy:
+  stop_profit_target: 0.20    # 止盈目标（20%）
+  max_loss: 0.30              # 最大可接受亏损（30%）
+  # 分档止盈配置 [收益率, 卖出比例]
+  stop_profit_levels:
+    - [0.15, 0.30]            # 盈利15%时卖出30%
+    - [0.18, 0.30]            # 盈利18%时卖出30%
+    - [0.20, 0.40]            # 盈利20%时清仓
+  # 金字塔加仓配置 [浮亏比例, 加仓比例]
+  add_position_levels:
+    - [-0.05, 0.05]           # 浮亏5%加仓5%
+    - [-0.10, 0.10]           # 浮亏10%加仓10%
+    - [-0.15, 0.15]           # 浮亏15%加仓15%
+    - [-0.20, 0.20]           # 浮亏20%加仓20%
+    - [-0.25, 0.25]           # 浮亏25%加仓25%
+  max_add_ratio: 1.0          # 最大加仓比例
+  # 各资产类型仓位限制
+  position_limits:
+    etf_index: 0.60           # 宽基ETF最大仓位60%
+    etf_sector: 0.15          # 行业ETF最大仓位15%
+    fund: 0.10                # 基金最大仓位10%
+    stock: 0.05               # 个股最大仓位5%
+
+# 大模型配置（AI分析功能）
+llm:
+  enabled: true
+  provider: "openai"          # 可选: openai, anthropic, deepseek, custom
+  api_key: ""                 # 填入你的 API Key
+  api_base: ""                # 可选，自定义 API 地址
+  model: "gpt-4"              # 模型名称
+  temperature: 0.7
+  max_tokens: 2000
+
+# JWT 认证配置
+jwt:
+  secret_key: "please-change-this-secret-key"  # 生产环境务必修改！
+  expires_hours: 24
+
+# 金融数据接口配置
+tushare:
+  enabled: false
+  token: ""                   # 填入你的 Tushare Token
+  base_url: "https://api.tushare.pro"
+  cache_enabled: true
+  cache_expire_hours: 24
+
+akshare:
+  enabled: true               # AKShare 免费，无需 Token
+
+# 显示配置
+display:
+  profit_color: "red"         # 盈利颜色（中国股市习惯：红涨）
+  loss_color: "green"         # 亏损颜色（中国股市习惯：绿跌）

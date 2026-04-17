@@ -5,13 +5,19 @@
 """
 
 from flask import Blueprint, request, g
-from .. import db
+from .. import db, limiter
 from ..models import Position, Trade
 from ..utils import success_response, error_response
 from ..utils.decorators import login_required, get_current_user
+from ..utils.validation import validate_body
+from ..schemas.position import PositionCreateSchema, PositionUpdateSchema
 from ..services import ProfitService
+from ..services.audit_service import AuditService
+from ..constants import get_asset_type_category, ProductCategory
 from datetime import datetime
 import logging
+import math
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -19,17 +25,60 @@ positions_bp = Blueprint('positions', __name__)
 profit_service = ProfitService()
 
 
+def clean_nan_values(obj):
+    """递归地将 NaN 和 Infinity 值转换为 None（JSON 兼容）"""
+    if isinstance(obj, dict):
+        return {k: clean_nan_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nan_values(item) for item in obj]
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    return obj
+
+
 @positions_bp.route('/positions', methods=['GET'])
 @login_required
 def get_positions():
-    """获取持仓列表"""
+    """获取持仓列表（不包含已清仓的数量为0的持仓）
+
+    支持排序参数：
+    - sort_by: 排序字段 (total_cost, market_value, profit_rate)
+    - sort_order: 排序方向 (asc, desc)
+    """
     try:
         user = get_current_user()
         account_id = request.args.get('account_id', type=int)
+        sort_by = request.args.get('sort_by', default='created_at')
+        sort_order = request.args.get('sort_order', default='desc')
 
         query = Position.query.filter_by(user_id=user.id)
         if account_id:
             query = query.filter_by(account_id=account_id)
+
+        # 过滤掉数量为0的已清仓持仓
+        query = query.filter(Position.quantity > 0)
+
+        # 排序处理
+        valid_sort_fields = {
+            'total_cost': Position.total_cost,
+            'market_value': Position.market_value,
+            'profit_rate': Position.profit_rate,
+            'created_at': Position.created_at,
+            'name': Position.name,
+            'quantity': Position.quantity
+        }
+
+        if sort_by in valid_sort_fields:
+            sort_column = valid_sort_fields[sort_by]
+            if sort_order == 'asc':
+                query = query.order_by(sort_column.asc())
+            else:
+                query = query.order_by(sort_column.desc())
+        else:
+            # 默认按创建时间倒序
+            query = query.order_by(Position.created_at.desc())
 
         positions = query.all()
         return success_response([p.to_dict() for p in positions])
@@ -53,25 +102,43 @@ def get_position(position_id):
 
 @positions_bp.route('/positions', methods=['POST'])
 @login_required
+@limiter.limit("20 per minute")
+@validate_body(PositionCreateSchema)
 def create_position():
     """创建持仓"""
     try:
         user = get_current_user()
-        data = request.get_json()
+        data = request.validated_data  # 使用 Pydantic 验证后的数据
 
-        # 验证必填字段
-        required = ['symbol', 'name', 'asset_type', 'quantity', 'cost_price']
-        for field in required:
-            if field not in data:
-                return error_response(f"缺少必填字段: {field}")
+        asset_type = data['asset_type']
+        product_category = data.get('product_category', get_asset_type_category(asset_type))
+
+        # 处理产品代码：市价产品必填，其他类型可自动生成
+        symbol = data.get('symbol', '').strip() if data.get('symbol') else ''
+        if not symbol:
+            if product_category == ProductCategory.MARKET and asset_type not in ['gold', 'silver']:
+                return error_response("市价型产品必须填写产品代码")
+            # 自动生成代码
+            date_str = datetime.now().strftime('%Y%m%d')
+            random_num = random.randint(0, 999)
+            if product_category == ProductCategory.FIXED_INCOME:
+                symbol = f"FI_{date_str}_{random_num:03d}"
+            elif product_category == ProductCategory.MANUAL:
+                symbol = f"MF_{date_str}_{random_num:03d}"
+            elif asset_type == 'gold':
+                symbol = f"AU_{random.randint(0, 9999):04d}"
+            elif asset_type == 'silver':
+                symbol = f"AG_{random.randint(0, 9999):04d}"
+            else:
+                symbol = f"MK_{date_str}_{random_num:03d}"
 
         # 获取账户 ID（默认为 1）
         account_id = data.get('account_id', 1)
 
         # 检查是否已存在（同账户内）
-        existing = Position.query.filter_by(user_id=user.id, account_id=account_id, symbol=data['symbol']).first()
+        existing = Position.query.filter_by(user_id=user.id, account_id=account_id, symbol=symbol).first()
         if existing:
-            return error_response(f"账户中已存在标的 {data['symbol']}")
+            return error_response(f"账户中已存在标的 {symbol}")
 
         # 计算总成本
         quantity = int(data['quantity'])
@@ -81,9 +148,9 @@ def create_position():
         position = Position(
             user_id=user.id,
             account_id=account_id,
-            symbol=data['symbol'],
+            symbol=symbol,
             name=data['name'],
-            asset_type=data['asset_type'],
+            asset_type=asset_type,
             quantity=quantity,
             cost_price=cost_price,
             current_price=data.get('current_price'),
@@ -91,6 +158,11 @@ def create_position():
             market_value=data.get('market_value'),
             category=data.get('category'),
             notes=data.get('notes'),
+            product_category=product_category,
+            product_params=data.get('product_params'),
+            mature_date=data.get('mature_date'),
+            risk_level=data.get('risk_level'),
+            expected_return=data.get('expected_return'),
             stop_profit_triggered='[false, false, false]'
         )
 
@@ -102,6 +174,14 @@ def create_position():
 
         db.session.add(position)
         db.session.commit()
+
+        # 记录审计日志
+        AuditService.log_create(
+            resource_type='position',
+            resource_id=position.id,
+            new_values={'symbol': symbol, 'name': data['name'], 'quantity': quantity, 'cost_price': cost_price},
+            details={'account_id': account_id}
+        )
 
         return success_response(position.to_dict(), "持仓创建成功")
     except Exception as e:
@@ -136,6 +216,16 @@ def update_position(position_id):
             position.category = data['category']
         if 'notes' in data:
             position.notes = data['notes']
+        if 'product_category' in data:
+            position.product_category = data['product_category']
+        if 'product_params' in data:
+            position.product_params = data['product_params']
+        if 'mature_date' in data:
+            position.mature_date = data['mature_date']
+        if 'risk_level' in data:
+            position.risk_level = data['risk_level']
+        if 'expected_return' in data:
+            position.expected_return = data['expected_return']
 
         # 重新计算
         position.total_cost = position.quantity * float(position.cost_price)
@@ -174,7 +264,7 @@ def delete_position(position_id):
 @positions_bp.route('/positions/summary', methods=['GET'])
 @login_required
 def get_positions_summary():
-    """获取持仓汇总"""
+    """获取持仓汇总（不包含已清仓的数量为0的持仓）"""
     try:
         user = get_current_user()
         account_id = request.args.get('account_id', type=int)
@@ -183,10 +273,33 @@ def get_positions_summary():
         if account_id:
             query = query.filter_by(account_id=account_id)
 
+        # 过滤掉数量为0的已清仓持仓
+        query = query.filter(Position.quantity > 0)
+
         positions = query.all()
 
-        # 转换为字典列表
-        positions_data = [p.to_dict() for p in positions]
+        # 构建带交易记录的持仓数据
+        positions_data = []
+        for p in positions:
+            # 获取卖出交易记录，计算原始持仓数量
+            sells = Trade.query.filter_by(
+                user_id=user.id,
+                symbol=p.symbol,
+                trade_type='sell'
+            ).order_by(Trade.trade_date).all()
+
+            # 计算原始持仓数量 = 当前数量 + 已卖出数量
+            total_sold = sum(t.quantity for t in sells)
+            original_quantity = p.quantity + total_sold
+
+            # 构建卖出记录列表
+            sell_records = [{'date': t.trade_date, 'quantity': t.quantity} for t in sells]
+
+            pos_data = p.to_dict()
+            pos_data['original_quantity'] = original_quantity
+            pos_data['sell_records'] = sell_records
+            pos_data['add_position_ratio'] = float(p.add_position_ratio) if p.add_position_ratio else 0
+            positions_data.append(pos_data)
 
         # 计算汇总
         summary = profit_service.portfolio_summary(positions_data)
@@ -215,7 +328,7 @@ def get_positions_summary():
 @positions_bp.route('/positions/<int:position_id>/signals', methods=['GET'])
 @login_required
 def get_position_signals(position_id):
-    """获取持仓操作信号"""
+    """获取持仓操作信号（智能止盈策略）"""
     try:
         user = get_current_user()
         position = Position.query.filter_by(id=position_id, user_id=user.id).first()
@@ -229,15 +342,36 @@ def get_position_signals(position_id):
                 'message': '请先更新当前价格'
             })
 
+        # 获取该持仓的所有卖出交易记录，计算原始持仓数量
+        sells = Trade.query.filter_by(
+            user_id=user.id,
+            symbol=position.symbol,
+            trade_type='sell'
+        ).order_by(Trade.trade_date).all()
+
+        # 计算原始持仓数量 = 当前数量 + 已卖出数量
+        total_sold = sum(t.quantity for t in sells)
+        original_quantity = position.quantity + total_sold
+
+        # 构建卖出记录列表
+        sell_records = [{'date': t.trade_date, 'quantity': t.quantity} for t in sells]
+
+        # 传入实际数据，智能判断
         result = profit_service.calculate_profit(
             position.cost_price,
             position.current_price,
-            position.quantity
+            position.quantity,
+            original_quantity=original_quantity,
+            sell_records=sell_records,
+            add_position_ratio=float(position.add_position_ratio) if position.add_position_ratio else 0
         )
 
         return success_response({
             'position': position.to_dict(),
-            'signals': result
+            'signals': result,
+            'original_quantity': original_quantity,
+            'total_sold': total_sold,
+            'sold_ratio': result.get('current_state', {}).get('sold_ratio', 0)
         })
     except Exception as e:
         return error_response(str(e))
@@ -473,6 +607,8 @@ def get_position_detail(position_id):
             except Exception as e:
                 logger.warning(f"获取基金净值历史失败: {e}")
 
+        # 清理 NaN 值，确保 JSON 序列化兼容
+        detail = clean_nan_values(detail)
         return success_response(detail)
     except Exception as e:
         import traceback
