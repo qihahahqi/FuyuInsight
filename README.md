@@ -61,7 +61,7 @@
 **如果你认同这个理念，欢迎交流：**
 
 - 邮箱：qihahahqi@163.com
-- GitHub Issues：[提交问题或建议](https://github.com/yourusername/financial-management-system/issues)
+- GitHub Issues：[提交问题或建议](https://github.com/qihahahqi/FuyuInsight/issues)
 
 ---
 
@@ -109,7 +109,7 @@
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/yourusername/financial-management-system.git
+git clone https://github.com/qihahahqi/FuyuInsight.git
 cd financial-management-system
 
 # 2. 初始化数据库（MySQL 需要先安装）
@@ -128,7 +128,7 @@ chmod +x start.sh
 
 ```cmd
 # 1. 克隆项目（或下载 ZIP 解压）
-git clone https://github.com/yourusername/financial-management-system.git
+git clone https://github.com/qihahahqi/FuyuInsight.git
 cd financial-management-system
 
 # 2. 初始化数据库（在 MySQL 客户端或命令行执行）
@@ -263,7 +263,7 @@ EXIT;
 ```bash
 # 上传项目到服务器（或使用 git clone）
 cd /opt
-git clone https://github.com/yourusername/financial-management-system.git
+git clone https://github.com/qihahahqi/FuyuInsight.git
 cd financial-management-system
 
 # 创建虚拟环境
