@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 大模型分析服务
+支持 OpenAI 兼容格式和 Anthropic 格式
 支持超时、重试和 Provider 降级机制
+兼容 DeepSeek 等国产大模型的增强参数（thinking、reasoning_effort）
 """
 
 from typing import Dict, List, Optional
@@ -10,11 +12,12 @@ import json
 import logging
 import time
 import functools
+import os
 
 logger = logging.getLogger(__name__)
 
-# 默认超时时间（秒）
-DEFAULT_TIMEOUT = 60
+# 默认超时时间（秒）- AI分析可能很慢，设置1小时
+DEFAULT_TIMEOUT = 3600
 
 # 最大重试次数
 MAX_RETRIES = 3
@@ -27,6 +30,26 @@ PROVIDER_FALLBACK_ORDER = ['openai', 'anthropic', 'deepseek', 'bailian', 'qwen',
 
 # 敏感字段（用于日志脱敏）
 SENSITIVE_FIELDS = ['api_key', 'password', 'token', 'secret', 'credential']
+
+# 从环境变量加载 API Key 映射
+# 支持的格式: DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY 等
+ENV_API_KEY_MAP = {
+    'deepseek': 'DEEPSEEK_API_KEY',
+    'openai': 'OPENAI_API_KEY',
+    'anthropic': 'ANTHROPIC_API_KEY',
+    'bailian': 'BAILIAN_API_KEY',
+    'qwen': 'QWEN_API_KEY',
+    'glm': 'GLM_API_KEY',
+    'minimax': 'MINIMAX_API_KEY',
+}
+
+
+def get_env_api_key(provider: str) -> Optional[str]:
+    """从环境变量获取 API Key"""
+    env_name = ENV_API_KEY_MAP.get(provider)
+    if env_name:
+        return os.environ.get(env_name)
+    return None
 
 
 def sanitize_log_data(data: dict) -> dict:
@@ -64,53 +87,80 @@ def retry_with_backoff(max_retries=MAX_RETRIES, base_delay=BASE_RETRY_DELAY):
 
 
 class LLMService:
-    """大模型分析服务"""
+    """大模型分析服务
+
+    支持两种 API 格式：
+    - openai: OpenAI 兼容格式（OpenAI、DeepSeek、百炼、通义千问、智谱GLM、MiniMax 等）
+    - anthropic: Anthropic 原生格式（Anthropic、百炼 Anthropic 兼容）
+
+    厂商特有参数：
+    - DeepSeek: reasoning_effort (低/中/高), thinking (enabled/disabled)
+    """
 
     SUPPORTED_PROVIDERS = {
         "openai": {
             "name": "OpenAI",
-            "models": ["gpt-5"],
-            "default_base": "https://api.openai.com/v1"
+            "models": ["gpt-5", "gpt-4o", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],
+            "default_base": "https://api.openai.com/v1",
+            "api_format": "openai",
+            "description": "OpenAI 官方 API"
         },
         "anthropic": {
             "name": "Anthropic",
-            "models": ["claude-3-opus-20240229"],
-            "default_base": "https://api.anthropic.com"
+            "models": ["claude-sonnet-5-20250915", "claude-opus-4-8-20250805", "claude-haiku-4-5-20251001", "claude-3-opus-20240229"],
+            "default_base": "https://api.anthropic.com",
+            "api_format": "anthropic",
+            "description": "Anthropic Claude 系列模型"
         },
         "deepseek": {
             "name": "DeepSeek",
-            "models": ["deepseek-chat"],
-            "default_base": "https://api.deepseek.com"
+            "models": ["deepseek-chat", "deepseek-v4-pro", "deepseek-reasoner"],
+            "default_base": "https://api.deepseek.com",
+            "api_format": "openai",
+            "description": "DeepSeek 深度求索（支持 reasoning_effort 和 thinking 参数）",
+            "supports_reasoning": True,  # 支持深度思考模式
         },
         "bailian": {
             "name": "百炼",
             "models": ["qwen-turbo", "qwen3.5-plus", "qwen3.5-max"],
-            "default_base": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            "default_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_format": "openai",
+            "description": "阿里云百炼平台（OpenAI 兼容模式）"
         },
         "qwen": {
             "name": "通义千问",
-            "models": ["qwen3.5-turbo", "qwen3.5-plus", "qwen-max", "qwen2.5-plus", "qwen3.5-plus"],
-            "default_base": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            "models": ["qwen3.5-turbo", "qwen3.5-plus", "qwen-max", "qwen2.5-plus"],
+            "default_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_format": "openai",
+            "description": "通义千问系列模型（OpenAI 兼容模式）"
         },
         "glm": {
             "name": "智谱GLM",
-            "models": ["glm-5", "glm-5-flash"],
-            "default_base": "https://open.bigmodel.cn/api/paas/v4"
+            "models": ["glm-5", "glm-5-flash", "glm-4-plus", "glm-4-flash"],
+            "default_base": "https://open.bigmodel.cn/api/paas/v4",
+            "api_format": "openai",
+            "description": "智谱 AI GLM 系列模型"
         },
         "bailian-anthropic": {
             "name": "百炼(Anthropic兼容)",
             "models": ["qwen3.5-turbo", "qwen3.5-plus"],
-            "default_base": "https://dashscope.aliyuncs.com/apps/anthropic"
+            "default_base": "https://dashscope.aliyuncs.com/apps/anthropic",
+            "api_format": "anthropic",
+            "description": "阿里云百炼平台（Anthropic 兼容模式）"
         },
         "minimax": {
             "name": "MiniMax",
             "models": ["abab6.5-chat", "abab5.5-chat", "abab5.5s-chat"],
-            "default_base": "https://api.minimax.chat/v1"
+            "default_base": "https://api.minimax.chat/v1",
+            "api_format": "openai",
+            "description": "MiniMax 大模型"
         },
         "custom": {
             "name": "自定义",
             "models": [],
-            "default_base": ""
+            "default_base": "",
+            "api_format": "openai",
+            "description": "自定义 OpenAI 兼容接口"
         }
     }
 
@@ -206,101 +256,143 @@ class LLMService:
         api_key: str = "",
         api_base: str = "",
         model: str = "gpt-4",
+        api_format: str = "",  # "openai" 或 "anthropic"，空字符串表示根据 provider 自动判断
         temperature: float = 0.7,
-        max_tokens: int = 2000
+        max_tokens: int = 2000,
+        reasoning_effort: str = "",  # DeepSeek 思考强度: "low", "medium", "high"
+        enable_thinking: bool = True  # DeepSeek 是否启用深度思考
     ):
         self.provider = provider
         self.api_key = api_key
         self.api_base = api_base or self.SUPPORTED_PROVIDERS.get(provider, {}).get("default_base", "")
         self.model = model
+
+        # API 格式：如果未指定，根据 provider 自动判断
+        provider_info = self.SUPPORTED_PROVIDERS.get(provider, {})
+        self.api_format = api_format or provider_info.get("api_format", "openai")
+
         self.temperature = temperature
         self.max_tokens = max_tokens
+
+        # DeepSeek 增强参数
+        self.reasoning_effort = reasoning_effort
+        self.enable_thinking = enable_thinking
+
         self._client = None
+
+    def _resolve_api_key(self) -> str:
+        """解析 API Key，优先使用配置的 Key，否则从环境变量获取"""
+        if self.api_key and self.api_key != '******':
+            return self.api_key
+        # 从环境变量获取
+        env_key = get_env_api_key(self.provider)
+        if env_key:
+            logger.info(f"[LLM] 从环境变量 {ENV_API_KEY_MAP.get(self.provider)} 获取 API Key")
+            return env_key
+        return self.api_key
 
     def _get_client(self):
         """获取API客户端（带超时配置）"""
         if self._client is not None:
             return self._client
 
-        if not self.api_key:
-            raise ValueError("API Key 未配置")
+        # 解析实际的 API Key
+        actual_api_key = self._resolve_api_key()
+
+        if not actual_api_key:
+            env_name = ENV_API_KEY_MAP.get(self.provider, 'API_KEY')
+            raise ValueError(f"API Key 未配置。请在设置中配置 API Key 或设置环境变量 {env_name}")
 
         # 脱敏日志
         log_data = sanitize_log_data({
             'provider': self.provider,
+            'api_format': self.api_format,
             'base_url': self.api_base,
-            'api_key': self.api_key[:8] + '...' if len(self.api_key) > 8 else '***'
+            'model': self.model,
+            'api_key': actual_api_key[:8] + '...' if len(actual_api_key) > 8 else '***'
         })
         logger.info(f"[LLM] 初始化客户端: {log_data}")
 
         try:
-            # OpenAI 兼容的提供商
-            openai_compatible = ["openai", "deepseek", "custom", "bailian", "qwen", "glm", "minimax"]
-            if self.provider in openai_compatible:
+            if self.api_format == "openai":
+                # OpenAI 兼容格式
                 from openai import OpenAI
                 self._client = OpenAI(
-                    api_key=self.api_key,
+                    api_key=actual_api_key,
                     base_url=self.api_base if self.api_base else None,
-                    timeout=DEFAULT_TIMEOUT  # 添加超时配置
+                    timeout=DEFAULT_TIMEOUT
                 )
-            elif self.provider == "bailian-anthropic":
-                # 百炼 Anthropic 兼容格式
+            elif self.api_format == "anthropic":
+                # Anthropic 原生格式
                 import anthropic
                 self._client = anthropic.Anthropic(
-                    api_key=self.api_key,
-                    base_url=self.api_base,
-                    timeout=DEFAULT_TIMEOUT  # 添加超时配置
-                )
-            elif self.provider == "anthropic":
-                import anthropic
-                self._client = anthropic.Anthropic(
-                    api_key=self.api_key,
-                    timeout=DEFAULT_TIMEOUT  # 添加超时配置
+                    api_key=actual_api_key,
+                    base_url=self.api_base if self.api_base else None,
+                    timeout=DEFAULT_TIMEOUT
                 )
             else:
-                raise ValueError(f"不支持的提供商: {self.provider}")
+                raise ValueError(f"不支持的 API 格式: {self.api_format}，支持: openai, anthropic")
 
             return self._client
         except ImportError as e:
             raise ImportError(f"请安装相关依赖: {e}")
 
+    def _build_openai_request_params(self, messages: List[Dict], **kwargs) -> Dict:
+        """构建 OpenAI 兼容格式的请求参数，处理厂商特有参数"""
+        params = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": kwargs.get('temperature', self.temperature),
+            "max_tokens": kwargs.get('max_tokens', self.max_tokens),
+        }
+
+        # DeepSeek 增强参数
+        if self.provider == "deepseek" and self.SUPPORTED_PROVIDERS.get("deepseek", {}).get("supports_reasoning"):
+            # reasoning_effort: 控制思考深度
+            effort = self.reasoning_effort or kwargs.get('reasoning_effort', '')
+            if effort:
+                params["reasoning_effort"] = effort
+
+            # thinking: 启用深度思考模式
+            if self.enable_thinking:
+                params["extra_body"] = {"thinking": {"type": "enabled"}}
+
+        return params
+
     def test_connection(self) -> Dict:
         """测试连接"""
         try:
             client = self._get_client()
-            openai_compatible = ["openai", "deepseek", "custom", "bailian", "qwen", "glm", "minimax"]
-            if self.provider in openai_compatible:
-                response = client.chat.completions.create(
-                    model=self.model,
+            if self.api_format == "openai":
+                params = self._build_openai_request_params(
                     messages=[{"role": "user", "content": "Hello"}],
                     max_tokens=10
                 )
+                response = client.chat.completions.create(**params)
                 return {
                     "success": True,
                     "message": "连接成功",
-                    "model": self.model
+                    "model": self.model,
+                    "api_format": self.api_format
                 }
-            elif self.provider in ["anthropic", "bailian-anthropic"]:
+            elif self.api_format == "anthropic":
                 response = client.messages.create(
                     model=self.model,
                     max_tokens=10,
                     messages=[{"role": "user", "content": "Hello"}]
                 )
-                # 处理返回内容
-                content_parts = []
-                for block in response.content:
-                    if hasattr(block, 'text'):
-                        content_parts.append(block.text)
                 return {
                     "success": True,
                     "message": "连接成功",
-                    "model": self.model
+                    "model": self.model,
+                    "api_format": self.api_format
                 }
         except Exception as e:
             return {
                 "success": False,
                 "message": str(e),
-                "model": self.model
+                "model": self.model,
+                "api_format": self.api_format
             }
 
     def analyze_portfolio_by_dimension(
@@ -518,29 +610,26 @@ class LLMService:
         try:
             client = self._get_client()
 
-            logger.info(f"[LLM] 开始调用API: provider={self.provider}, model={self.model}, dimension={dimension}")
+            logger.info(f"[LLM] 开始调用API: provider={self.provider}, model={self.model}, api_format={self.api_format}, dimension={dimension}")
 
-            openai_compatible = ["openai", "deepseek", "custom", "bailian", "qwen", "glm", "minimax"]
-            if self.provider in openai_compatible:
-                response = client.chat.completions.create(
-                    model=self.model,
+            if self.api_format == "openai":
+                params = self._build_openai_request_params(
                     messages=[
                         {"role": "system", "content": "你是一位专业的投资顾问，擅长价值投资和风险控制。"},
                         {"role": "user", "content": prompt}
-                    ],
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens
+                    ]
                 )
+                response = client.chat.completions.create(**params)
                 content = response.choices[0].message.content
                 logger.info(f"[LLM] API调用成功: dimension={dimension}, response_length={len(content)}")
-            elif self.provider in ["anthropic", "bailian-anthropic"]:
+            elif self.api_format == "anthropic":
                 response = client.messages.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
                     system="你是一位专业的投资顾问，擅长价值投资和风险控制。请直接输出分析结果，不要输出思考过程。",
                     messages=[{"role": "user", "content": prompt}]
                 )
-                # 处理百炼返回的多种content block类型
+                # 处理返回的多种content block类型
                 content_parts = []
                 for block in response.content:
                     if hasattr(block, 'text') and block.text:
@@ -552,23 +641,25 @@ class LLMService:
                 content = '\n'.join(content_parts)
                 logger.info(f"[LLM] Anthropic API调用成功: dimension={dimension}, response_length={len(content)}")
             else:
-                raise ValueError(f"不支持的提供商: {self.provider}")
+                raise ValueError(f"不支持的 API 格式: {self.api_format}")
 
             return {
                 "success": True,
                 "analysis": content,
                 "model": self.model,
-                "provider": self.provider
+                "provider": self.provider,
+                "api_format": self.api_format
             }
 
         except Exception as e:
-            logger.error(f"[LLM] API调用失败: provider={self.provider}, model={self.model}, dimension={dimension}, error={str(e)}")
+            logger.error(f"[LLM] API调用失败: provider={self.provider}, model={self.model}, dimension={dimension}, api_format={self.api_format}, error={str(e)}")
             return {
                 "success": False,
                 "error": str(e),
                 "analysis": f"分析失败: {str(e)}",
                 "model": self.model,
-                "provider": self.provider
+                "provider": self.provider,
+                "api_format": self.api_format
             }
 
     def analyze_portfolio(
@@ -603,45 +694,41 @@ class LLMService:
         try:
             client = self._get_client()
 
-            openai_compatible = ["openai", "deepseek", "custom", "bailian", "qwen", "glm", "minimax"]
-            if self.provider in openai_compatible:
-                response = client.chat.completions.create(
-                    model=self.model,
+            if self.api_format == "openai":
+                params = self._build_openai_request_params(
                     messages=[
                         {"role": "system", "content": "你是一位专业的投资顾问，擅长价值投资和风险控制。"},
                         {"role": "user", "content": prompt}
-                    ],
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens
+                    ]
                 )
+                response = client.chat.completions.create(**params)
                 content = response.choices[0].message.content
-            elif self.provider in ["anthropic", "bailian-anthropic"]:
+            elif self.api_format == "anthropic":
                 response = client.messages.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
                     system="你是一位专业的投资顾问，擅长价值投资和风险控制。请直接输出分析结果，不要输出思考过程。",
                     messages=[{"role": "user", "content": prompt}]
                 )
-                # 处理百炼返回的多种content block类型
+                # 处理返回的多种content block类型
                 content_parts = []
                 for block in response.content:
-                    # 只提取文本内容，跳过 thinking 等其他类型
                     if hasattr(block, 'text') and block.text:
                         content_parts.append(block.text)
                     elif hasattr(block, 'type'):
-                        # 跳过 thinking_block 等非文本类型
                         if block.type == 'text':
                             if hasattr(block, 'text'):
                                 content_parts.append(block.text)
                 content = '\n'.join(content_parts)
             else:
-                raise ValueError(f"不支持的提供商: {self.provider}")
+                raise ValueError(f"不支持的 API 格式: {self.api_format}")
 
             return {
                 "success": True,
                 "analysis": content,
                 "model": self.model,
-                "provider": self.provider
+                "provider": self.provider,
+                "api_format": self.api_format
             }
 
         except Exception as e:
@@ -649,7 +736,8 @@ class LLMService:
                 "success": False,
                 "error": str(e),
                 "model": self.model,
-                "provider": self.provider
+                "provider": self.provider,
+                "api_format": self.api_format
             }
 
     def analyze_single_position(
@@ -662,7 +750,6 @@ class LLMService:
 
         # 维度分析模板（扩展为13个模块）
         dimension_prompts = {
-            # 原有维度
             'market': """## 市场分析
 请分析当前市场环境对该标的的影响：
 1. 大盘走势及市场情绪
@@ -707,7 +794,6 @@ class LLMService:
 
 请给出1-10分的评分，并说明理由。""",
 
-            # 新增维度
             'trader_plan': """## 💼 交易员计划
 你是一位专业交易员，请制定具体的交易计划：
 1. 投资建议：买入/持有/减仓/卖出
@@ -845,20 +931,17 @@ class LLMService:
 
                 try:
                     client = self._get_client()
-                    openai_compatible = ["openai", "deepseek", "custom", "bailian", "qwen", "glm", "minimax"]
 
-                    if self.provider in openai_compatible:
-                        response = client.chat.completions.create(
-                            model=self.model,
+                    if self.api_format == "openai":
+                        params = self._build_openai_request_params(
                             messages=[
                                 {"role": "system", "content": "你是一位专业的投资分析师，请客观分析并给出评分。返回JSON格式。"},
                                 {"role": "user", "content": prompt}
-                            ],
-                            temperature=self.temperature,
-                            max_tokens=self.max_tokens
+                            ]
                         )
+                        response = client.chat.completions.create(**params)
                         content = response.choices[0].message.content
-                    elif self.provider in ["anthropic", "bailian-anthropic"]:
+                    elif self.api_format == "anthropic":
                         response = client.messages.create(
                             model=self.model,
                             max_tokens=self.max_tokens,

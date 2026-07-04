@@ -6,7 +6,7 @@ AI 分析 API
 
 from flask import Blueprint, request
 from .. import db
-from ..models import Position, Valuation, Trade, Config, AIAnalysisHistory
+from ..models import Position, Valuation, Trade, Config, AIAnalysisHistory, AIAnalysisTask, AIAnalysisDimension
 from ..utils import success_response, error_response
 from ..utils.decorators import login_required, get_current_user
 from ..services import LLMService
@@ -129,19 +129,19 @@ def test_connection():
         api_base = data.get('api_base') or llm_config.get('api_base', '')
         model = data.get('model') or llm_config.get('model', 'gpt-4')
 
-        # 从数据库获取用户的 API Key
+        # 从数据库获取用户的 API Key，也可以从环境变量读取
         if not api_key or api_key == '******':
             api_key_config = Config.query.filter_by(key='llm.api_key', user_id=user.id).first()
             api_key = api_key_config.value if api_key_config else llm_config.get('api_key', '')
 
-        if not api_key:
-            return error_response("请配置 API Key")
+        # 不在此处检查 api_key — LLMService._resolve_api_key() 会自动从环境变量获取
 
         service = LLMService(
             provider=provider,
             api_key=api_key,
             api_base=api_base,
-            model=model
+            model=model,
+            api_format=data.get('api_format', '')
         )
 
         result = service.test_connection()
@@ -194,7 +194,7 @@ def analyze():
 
         # 获取LLM配置
         llm_config = config_manager.llm_config.copy()
-        config_keys = ['enabled', 'provider', 'model', 'api_base', 'temperature', 'max_tokens']
+        config_keys = ['enabled', 'provider', 'model', 'api_base', 'api_format', 'temperature', 'max_tokens']
         for key in config_keys:
             db_config = Config.query.filter_by(key=f'llm.{key}', user_id=user.id).first()
             if db_config:
@@ -218,14 +218,22 @@ def analyze():
         if not api_key:
             return error_response("请先配置 API Key")
 
+        # 安全解析布尔值
+        _enable_thinking = llm_config.get('enable_thinking', False)
+        if isinstance(_enable_thinking, str):
+            _enable_thinking = _enable_thinking.lower() == 'true'
+
         # 创建服务实例
         service = LLMService(
             provider=llm_config.get('provider', 'openai'),
             api_key=api_key,
             api_base=llm_config.get('api_base', ''),
             model=llm_config.get('model', 'gpt-4'),
+            api_format=llm_config.get('api_format', ''),
             temperature=llm_config.get('temperature', 0.7),
-            max_tokens=llm_config.get('max_tokens', 2000)
+            max_tokens=llm_config.get('max_tokens', 2000),
+            reasoning_effort=llm_config.get('reasoning_effort', ''),
+            enable_thinking=_enable_thinking
         )
 
         # 收集持仓数据
@@ -264,73 +272,154 @@ def analyze():
             overall_score = int(sum(scores) / len(scores)) if scores else None
 
         else:
-            # 全仓分析 - 每个维度独立分析
+            # 全仓分析 - 每个维度独立分析（增量保存，防止数据丢失）
             if not positions:
                 logger.warning(f"[AI分析] 用户{user.id}无持仓数据")
                 return error_response("暂无持仓数据，请先添加持仓")
 
             logger.info(f"[AI分析] 用户{user.id}全仓分析: {len(positions)}个持仓, {len(dimensions)}个维度")
 
-            # 对每个维度进行独立分析
+            # 创建任务记录（增量保存机制）
+            task = AIAnalysisTask(
+                user_id=user.id,
+                analysis_type='portfolio',
+                position_id=None,
+                symbol=None,
+                dimensions=json.dumps(dimensions, ensure_ascii=False),
+                status='running',
+                progress=0,
+                total_dimensions=len(dimensions),
+                current_dimension=None,
+                model_provider=llm_config.get('provider', ''),
+                model_name=llm_config.get('model', '')
+            )
+            db.session.add(task)
+            db.session.commit()
+            logger.info(f"[AI分析] 创建任务记录: task_id={task.id}")
+
+            # 对每个维度进行独立分析，完成后立即保存
             dimension_results = {}
 
             for dim in dimensions:
-                logger.info(f"[AI分析] 开始分析维度: {dim}")
-                analysis_result = service.analyze_portfolio_by_dimension(
-                    positions=[p.to_dict() for p in positions],
-                    valuations=[v.to_dict() for v in valuations],
-                    trades=[t.to_dict() for t in trades],
-                    strategy_params=config_manager.strategy_config,
-                    dimension=dim
-                )
+                try:
+                    logger.info(f"[AI分析] 开始分析维度: {dim}")
+                    task.current_dimension = dim
+                    db.session.commit()
 
-                if analysis_result.get('success'):
-                    analysis_text = analysis_result.get('analysis', '')
-                    # 从分析内容中提取评分
-                    score = extract_score_from_analysis(analysis_text)
-                    logger.info(f"[AI分析] 维度{dim}完成, 评分={score}, 内容长度={len(analysis_text)}")
+                    analysis_result = service.analyze_portfolio_by_dimension(
+                        positions=[p.to_dict() for p in positions],
+                        valuations=[v.to_dict() for v in valuations],
+                        trades=[t.to_dict() for t in trades],
+                        strategy_params=config_manager.strategy_config,
+                        dimension=dim
+                    )
+
+                    if analysis_result.get('success'):
+                        analysis_text = analysis_result.get('analysis', '')
+                        score = extract_score_from_analysis(analysis_text)
+                        logger.info(f"[AI分析] 维度{dim}完成, 评分={score}, 内容长度={len(analysis_text)}")
+                        dimension_results[dim] = {
+                            'analysis': analysis_text,
+                            'score': score
+                        }
+
+                        # 增量保存：每个维度完成后立即存入数据库
+                        dim_record = AIAnalysisDimension(
+                            task_id=task.id,
+                            dimension=dim,
+                            status='completed',
+                            score=score,
+                            analysis=analysis_text
+                        )
+                        db.session.add(dim_record)
+                    else:
+                        error_msg = analysis_result.get('error', '未知错误')
+                        logger.error(f"[AI分析] 维度{dim}失败: {error_msg}")
+                        dimension_results[dim] = {
+                            'analysis': f"分析失败: {error_msg}",
+                            'score': None
+                        }
+
+                        dim_record = AIAnalysisDimension(
+                            task_id=task.id,
+                            dimension=dim,
+                            status='failed',
+                            score=None,
+                            analysis=None,
+                            error_message=error_msg
+                        )
+                        db.session.add(dim_record)
+
+                    # 更新任务进度
+                    task.progress += 1
+                    db.session.commit()
+                    logger.info(f"[AI分析] 维度{dim}已保存到数据库，进度: {task.progress}/{task.total_dimensions}")
+
+                except Exception as dim_error:
+                    logger.error(f"[AI分析] 维度{dim}处理异常: {str(dim_error)}")
                     dimension_results[dim] = {
-                        'analysis': analysis_text,
-                        'score': score
-                    }
-                else:
-                    logger.error(f"[AI分析] 维度{dim}失败: {analysis_result.get('error')}")
-                    dimension_results[dim] = {
-                        'analysis': f"分析失败: {analysis_result.get('error', '未知错误')}",
+                        'analysis': f"分析异常: {str(dim_error)}",
                         'score': None
                     }
+                    dim_record = AIAnalysisDimension(
+                        task_id=task.id,
+                        dimension=dim,
+                        status='failed',
+                        score=None,
+                        analysis=None,
+                        error_message=str(dim_error)
+                    )
+                    db.session.add(dim_record)
+                    task.progress += 1
+                    db.session.commit()
+
+            # 计算综合评分
+            scores = [r.get('score') for r in dimension_results.values() if r.get('score')]
+            overall_score = int(sum(scores) / len(scores)) if scores else None
 
             result_data = {
                 'analysis_type': 'portfolio',
                 'dimensions': dimension_results
             }
 
-            # 计算综合评分
-            scores = [r.get('score') for r in dimension_results.values() if r.get('score')]
-            overall_score = int(sum(scores) / len(scores)) if scores else None
+            # 保存汇总历史记录
+            try:
+                history = AIAnalysisHistory(
+                    user_id=user.id,
+                    position_id=None,
+                    analysis_type='portfolio',
+                    symbol=None,
+                    dimensions=json.dumps(dimensions, ensure_ascii=False),
+                    analysis_content=json.dumps(result_data, ensure_ascii=False),
+                    overall_score=overall_score,
+                    model_provider=llm_config.get('provider', ''),
+                    model_name=llm_config.get('model', '')
+                )
+                db.session.add(history)
 
-        # 保存分析历史
-        history = AIAnalysisHistory(
-            user_id=user.id,
-            position_id=position_id if analysis_type == 'single' and position else None,
-            analysis_type=analysis_type,
-            symbol=position.symbol if analysis_type == 'single' and position else None,
-            dimensions=json.dumps(dimensions, ensure_ascii=False),
-            analysis_content=json.dumps(result_data, ensure_ascii=False),
-            overall_score=overall_score,
-            model_provider=llm_config.get('provider', ''),
-            model_name=llm_config.get('model', '')
-        )
-        db.session.add(history)
-        db.session.commit()
+                # 更新任务状态为完成
+                task.status = 'completed'
+                task.overall_score = overall_score
+                task.completed_at = datetime.utcnow()
+                db.session.commit()
 
-        logger.info(f"[AI分析] 用户{user.id}分析完成: overall_score={overall_score}, history_id={history.id}")
+                logger.info(f"[AI分析] 用户{user.id}分析完成: overall_score={overall_score}, history_id={history.id}, task_id={task.id}")
+                result_data['id'] = history.id
+                result_data['task_id'] = task.id
+            except Exception as save_error:
+                # 即使汇总保存失败，增量数据已保存，记录错误但不丢失数据
+                logger.error(f"[AI分析] 汇总保存失败: {str(save_error)}，但增量数据已保存在task_id={task.id}")
+                task.status = 'completed'
+                task.overall_score = overall_score
+                task.completed_at = datetime.utcnow()
+                db.session.commit()
+                result_data['task_id'] = task.id
+                result_data['saved_incrementally'] = True
 
-        result_data['id'] = history.id
-        if overall_score:
-            result_data['overall_score'] = overall_score
+            if overall_score:
+                result_data['overall_score'] = overall_score
 
-        return success_response(result_data)
+            return success_response(result_data)
     except Exception as e:
         logger.error(f"[AI分析] 分析失败: {str(e)}")
         import traceback
@@ -410,6 +499,122 @@ def delete_analysis_history(history_id):
         return error_response(str(e))
 
 
+@ai_bp.route('/ai/task/<int:task_id>/restore', methods=['GET'])
+@login_required
+def restore_task_result(task_id):
+    """从增量保存的任务数据中恢复完整分析结果"""
+    try:
+        user = get_current_user()
+
+        task = AIAnalysisTask.query.filter_by(id=task_id, user_id=user.id).first()
+        if not task:
+            return error_response("任务不存在", 404)
+
+        # 获取所有维度的分析结果
+        dimensions = AIAnalysisDimension.query.filter_by(task_id=task_id).all()
+
+        if not dimensions:
+            return error_response("该任务无维度数据", 404)
+
+        # 重建完整的分析结果
+        dimension_results = {}
+        for dim in dimensions:
+            dimension_results[dim.dimension] = {
+                'analysis': dim.analysis,
+                'score': dim.score
+            }
+
+        result = {
+            'id': None,
+            'task_id': task_id,
+            'analysis_type': task.analysis_type,
+            'dimensions': dimension_results,
+            'overall_score': task.overall_score,
+            'model_provider': task.model_provider,
+            'model_name': task.model_name,
+            'created_at': task.created_at.isoformat() if task.created_at else None,
+            'completed_at': task.completed_at.isoformat() if task.completed_at else None,
+            'restored_from_task': True,
+            'saved_incrementally': True
+        }
+
+        return success_response(result)
+    except Exception as e:
+        return error_response(str(e))
+
+
+@ai_bp.route('/ai/task/<int:task_id>/rebuild', methods=['POST'])
+@login_required
+def rebuild_history_from_task(task_id):
+    """从增量保存的任务数据重建历史记录"""
+    try:
+        user = get_current_user()
+
+        task = AIAnalysisTask.query.filter_by(id=task_id, user_id=user.id).first()
+        if not task:
+            return error_response("任务不存在", 404)
+
+        # 检查是否已有历史记录
+        existing = AIAnalysisHistory.query.filter_by(
+            user_id=user.id,
+            analysis_type=task.analysis_type,
+            created_at=task.created_at
+        ).first()
+
+        if existing:
+            return success_response({
+                'message': '历史记录已存在',
+                'history_id': existing.id
+            })
+
+        # 获取所有维度的分析结果
+        dimensions = AIAnalysisDimension.query.filter_by(task_id=task_id).all()
+
+        if not dimensions:
+            return error_response("该任务无维度数据", 404)
+
+        # 重建完整的分析结果JSON
+        dimension_results = {}
+        for dim in dimensions:
+            dimension_results[dim.dimension] = {
+                'analysis': dim.analysis,
+                'score': dim.score
+            }
+
+        result_data = {
+            'analysis_type': task.analysis_type,
+            'dimensions': dimension_results
+        }
+
+        # 创建历史记录
+        history = AIAnalysisHistory(
+            user_id=user.id,
+            position_id=task.position_id,
+            analysis_type=task.analysis_type,
+            symbol=task.symbol,
+            dimensions=task.dimensions,
+            analysis_content=json.dumps(result_data, ensure_ascii=False),
+            overall_score=task.overall_score,
+            model_provider=task.model_provider,
+            model_name=task.model_name,
+            created_at=task.created_at
+        )
+        db.session.add(history)
+        db.session.commit()
+
+        logger.info(f"[AI分析] 从任务{task_id}重建历史记录: history_id={history.id}")
+
+        return success_response({
+            'message': '历史记录重建成功',
+            'history_id': history.id,
+            'task_id': task_id
+        })
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"[AI分析] 重建历史记录失败: {str(e)}")
+        return error_response(str(e))
+
+
 # ============ 异步任务 API ============
 
 
@@ -453,7 +658,7 @@ def start_async_analysis():
 
         # 获取 LLM 配置
         llm_config = config_manager.llm_config.copy()
-        config_keys = ['enabled', 'provider', 'model']
+        config_keys = ['enabled', 'provider', 'model', 'api_format']
         for key in config_keys:
             db_config = Config.query.filter_by(key=f'llm.{key}', user_id=user.id).first()
             if db_config:
@@ -494,7 +699,8 @@ def start_async_analysis():
             position_id=position_id,
             symbol=symbol,
             model_provider=llm_config.get('provider', 'openai'),
-            model_name=llm_config.get('model', 'gpt-4')
+            model_name=llm_config.get('model', 'gpt-4'),
+            api_format=llm_config.get('api_format', '')
         )
 
         return success_response(result)
@@ -601,4 +807,174 @@ def delete_task(task_id):
         return success_response(result)
     except Exception as e:
         db.session.rollback()
+        return error_response(str(e))
+
+
+@ai_bp.route('/ai/tasks/running', methods=['GET'])
+@login_required
+def get_running_task():
+    """获取用户当前正在进行的任务"""
+    try:
+        user = get_current_user()
+
+        # 查找正在运行的任务
+        task = AIAnalysisTask.query.filter_by(
+            user_id=user.id,
+            status='running'
+        ).order_by(AIAnalysisTask.created_at.desc()).first()
+
+        if not task:
+            return success_response(None)
+
+        # 获取各维度的状态
+        dimensions = AIAnalysisDimension.query.filter_by(task_id=task.id).all()
+        dimensions_status = []
+        for dim in dimensions:
+            dimensions_status.append({
+                'dimension': dim.dimension,
+                'status': dim.status,
+                'score': dim.score
+            })
+
+        # 如果数据库中没有维度记录，从dimensions JSON中解析待分析维度
+        if not dimensions_status and task.dimensions:
+            try:
+                dim_list = json.loads(task.dimensions)
+                for d in dim_list:
+                    dimensions_status.append({
+                        'dimension': d,
+                        'status': 'pending',
+                        'score': None
+                    })
+            except:
+                pass
+
+        result = {
+            'task_id': task.id,
+            'status': task.status,
+            'analysis_type': task.analysis_type,
+            'progress': task.progress,
+            'total_dimensions': task.total_dimensions,
+            'progress_percentage': task.get_progress_percentage(),
+            'current_dimension': task.current_dimension,
+            'overall_score': task.overall_score,
+            'model_provider': task.model_provider,
+            'model_name': task.model_name,
+            'created_at': task.created_at.isoformat() if task.created_at else None,
+            'updated_at': task.updated_at.isoformat() if task.updated_at else None,
+            'dimensions_status': dimensions_status,
+            'error_message': task.error_message
+        }
+
+        return success_response(result)
+    except Exception as e:
+        return error_response(str(e))
+
+
+@ai_bp.route('/ai/tasks/<int:task_id>/recover', methods=['POST'])
+@login_required
+def recover_interrupted_task(task_id):
+    """恢复中断的任务：标记未完成维度为失败，返回已完成结果"""
+    try:
+        user = get_current_user()
+
+        task = AIAnalysisTask.query.filter_by(id=task_id, user_id=user.id).first()
+        if not task:
+            return error_response("任务不存在", 404)
+
+        # 只允许恢复 interrupted 或 running 状态的任务
+        if task.status not in ['interrupted', 'running']:
+            return error_response(f"任务状态为 {task.status}，无需恢复")
+
+        # 查找所有 pending 状态的维度，标记为 failed
+        pending_dims = AIAnalysisDimension.query.filter_by(
+            task_id=task_id,
+            status='pending'
+        ).all()
+
+        for dim in pending_dims:
+            dim.status = 'failed'
+            dim.error_message = '任务被中断'
+
+        # 如果没有任何维度记录，从dimensions JSON中创建failed记录
+        completed_dims = AIAnalysisDimension.query.filter_by(task_id=task_id).all()
+        if not completed_dims and task.dimensions:
+            try:
+                dim_list = json.loads(task.dimensions)
+                for d in dim_list:
+                    dim_record = AIAnalysisDimension(
+                        task_id=task_id,
+                        dimension=d,
+                        status='failed',
+                        error_message='任务被中断'
+                    )
+                    db.session.add(dim_record)
+            except:
+                pass
+
+        # 更新任务状态
+        task.status = 'interrupted'
+        task.error_message = '服务重启，任务被中断'
+        db.session.commit()
+
+        # 返回已完成维度的结果
+        completed_dims = AIAnalysisDimension.query.filter_by(
+            task_id=task_id,
+            status='completed'
+        ).all()
+
+        dimension_results = {}
+        for dim in completed_dims:
+            dimension_results[dim.dimension] = {
+                'analysis': dim.analysis,
+                'score': dim.score
+            }
+
+        result = {
+            'task_id': task_id,
+            'status': 'interrupted',
+            'message': '任务已恢复，未完成维度标记为失败',
+            'completed_dimensions': dimension_results,
+            'completed_count': len(completed_dims),
+            'total_dimensions': task.total_dimensions
+        }
+
+        return success_response(result)
+    except Exception as e:
+        db.session.rollback()
+        return error_response(str(e))
+
+
+@ai_bp.route('/ai/tasks/interrupted', methods=['GET'])
+@login_required
+def get_interrupted_tasks():
+    """获取用户所有中断的任务"""
+    try:
+        user = get_current_user()
+
+        tasks = AIAnalysisTask.query.filter_by(
+            user_id=user.id,
+            status='interrupted'
+        ).order_by(AIAnalysisTask.created_at.desc()).limit(10).all()
+
+        result = []
+        for task in tasks:
+            # 获取已完成维度数
+            completed_count = AIAnalysisDimension.query.filter_by(
+                task_id=task.id,
+                status='completed'
+            ).count()
+
+            result.append({
+                'task_id': task.id,
+                'analysis_type': task.analysis_type,
+                'progress': task.progress,
+                'total_dimensions': task.total_dimensions,
+                'completed_count': completed_count,
+                'created_at': task.created_at.isoformat() if task.created_at else None,
+                'interrupted_at': task.updated_at.isoformat() if task.updated_at else None
+            })
+
+        return success_response(result)
+    except Exception as e:
         return error_response(str(e))

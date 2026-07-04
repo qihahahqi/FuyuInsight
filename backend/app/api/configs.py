@@ -153,17 +153,19 @@ def get_llm_config():
         llm_config = config_manager.llm_config.copy()
 
         # 从数据库覆盖
-        for key in ['provider', 'model', 'api_base', 'temperature', 'max_tokens', 'enabled']:
+        for key in ['provider', 'model', 'api_base', 'api_format', 'temperature', 'max_tokens', 'enabled', 'reasoning_effort', 'enable_thinking']:
             db_config = Config.query.filter_by(key=f'llm.{key}', user_id=user.id).first()
             if db_config:
                 try:
                     value = json.loads(db_config.value)
-                    # 处理布尔值
-                    if key == 'enabled' and isinstance(value, str):
-                        value = value.lower() == 'true'
                     llm_config[key] = value
                 except:
-                    llm_config[key] = db_config.value
+                    # json.loads 失败，使用原始字符串值
+                    value = db_config.value
+                    # 处理布尔值字段
+                    if key in ['enabled', 'enable_thinking']:
+                        value = value.lower() == 'true' if isinstance(value, str) else bool(value)
+                    llm_config[key] = value
 
         # 检查 API Key 是否配置
         api_key_config = Config.query.filter_by(key='llm.api_key', user_id=user.id).first()
@@ -198,7 +200,10 @@ def update_llm_config():
                 continue  # 不更新隐藏的 API Key
 
             db_key = f'llm.{key}'
-            if isinstance(value, (dict, list)):
+            # 布尔值用 json.dumps 确保正确存储
+            if isinstance(value, bool):
+                value_str = json.dumps(value)
+            elif isinstance(value, (dict, list)):
                 value_str = json.dumps(value, ensure_ascii=False)
             else:
                 value_str = str(value)
@@ -223,12 +228,21 @@ def update_llm_config():
         db.session.commit()
         logger.info("LLM config saved successfully")
 
-        # 更新内存配置
+        # 更新内存配置并持久化到 config.yaml 文件
         current_llm = config_manager.get('llm', {})
         current_llm.update(data)
+        # api_key 为 ****** 时保留原值，不覆盖
         if 'api_key' in data and data['api_key'] == '******':
-            current_llm.pop('api_key', None)
+            current_llm.pop('api_key', None)  # 移除占位符，恢复为已有值
+            # 如果之前有保存的 api_key，保持不变；否则设置为空
+            if not current_llm.get('api_key'):
+                # 从数据库恢复
+                api_key_config = Config.query.filter_by(key='llm.api_key', user_id=user.id).first()
+                if api_key_config and api_key_config.value:
+                    current_llm['api_key'] = api_key_config.value
         config_manager.set('llm', current_llm)
+        config_manager.save()  # 写入 config/config.yaml 文件
+        logger.info("LLM config saved to config.yaml file")
 
         return success_response(None, "大模型配置更新成功")
     except IntegrityError as e:
@@ -254,7 +268,7 @@ def test_llm_connection():
         llm_config = config_manager.llm_config.copy()
 
         # 从数据库读取用户级别的配置
-        config_keys = ['provider', 'model', 'api_base']
+        config_keys = ['provider', 'model', 'api_base', 'api_format']
         for key in config_keys:
             db_config = Config.query.filter_by(key=f'llm.{key}', user_id=user.id).first()
             if db_config:
@@ -263,21 +277,22 @@ def test_llm_connection():
         provider = data.get('provider') or llm_config.get('provider', 'openai')
         model = data.get('model') or llm_config.get('model', 'gpt-4')
         api_base = data.get('api_base') or llm_config.get('api_base', '')
+        api_format = data.get('api_format') or llm_config.get('api_format', '')
 
-        # API Key 从数据库获取或使用传入值
+        # API Key 从数据库获取或使用传入值，也可以从环境变量读取
         api_key = data.get('api_key')
         if not api_key or api_key == '******':
             api_key_config = Config.query.filter_by(key='llm.api_key', user_id=user.id).first()
             api_key = api_key_config.value if api_key_config else ''
 
-        if not api_key:
-            return error_response("请配置 API Key")
+        # 不在此处检查 api_key 是否为空 — LLMService 会自动从环境变量获取
 
         service = LLMService(
             provider=provider,
             api_key=api_key,
             api_base=api_base,
-            model=model
+            model=model,
+            api_format=api_format
         )
 
         result = service.test_connection()

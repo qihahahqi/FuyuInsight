@@ -9,6 +9,14 @@ from .. import db
 import json
 
 
+def get_local_now():
+    """获取本地时间（中国时区 UTC+8）"""
+    from datetime import timezone, timedelta
+    # 中国时区 UTC+8
+    china_tz = timezone(timedelta(hours=8))
+    return datetime.now(china_tz).replace(tzinfo=None)  # 移除时区信息以便存储
+
+
 class Account(db.Model):
     """投资账户表"""
     __tablename__ = 'accounts'
@@ -20,8 +28,8 @@ class Account(db.Model):
     broker = db.Column(db.String(50), comment='券商/平台')
     description = db.Column(db.Text, comment='描述')
     is_active = db.Column(db.Boolean, default=True, comment='是否启用')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment='更新时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
+    updated_at = db.Column(db.DateTime, default=get_local_now, onupdate=get_local_now, comment='更新时间')
 
     def to_dict(self):
         """转换为字典"""
@@ -49,7 +57,7 @@ class Position(db.Model):
     name = db.Column(db.String(50), nullable=False, comment='标的名称')
     asset_type = db.Column(db.String(20), nullable=False, comment='资产类型')
     product_category = db.Column(db.String(20), default='market', comment='产品大类: market/fixed_income/manual')
-    quantity = db.Column(db.Integer, nullable=False, default=0, comment='持仓数量')
+    quantity = db.Column(db.Numeric(12, 4), nullable=False, default=0, comment='持仓数量/份额')
     cost_price = db.Column(db.Numeric(10, 4), nullable=False, default=0, comment='成本价')
     current_price = db.Column(db.Numeric(10, 4), comment='当前价格')
     total_cost = db.Column(db.Numeric(12, 2), nullable=False, default=0, comment='总成本')
@@ -64,8 +72,8 @@ class Position(db.Model):
     add_position_ratio = db.Column(db.Numeric(5, 4), default=0, comment='已加仓比例')
     category = db.Column(db.String(20), comment='分类')
     notes = db.Column(db.Text, comment='备注')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment='更新时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
+    updated_at = db.Column(db.DateTime, default=get_local_now, onupdate=get_local_now, comment='更新时间')
 
     account = db.relationship('Account', backref=db.backref('positions', lazy='dynamic'))
 
@@ -125,6 +133,7 @@ class Position(db.Model):
             'id': self.id,
             'user_id': self.user_id,
             'account_id': self.account_id,
+            'account_name': self.account.name if self.account else None,
             'symbol': self.symbol,
             'name': self.name,
             'asset_type': self.asset_type,
@@ -167,7 +176,7 @@ class Trade(db.Model):
     reason = db.Column(db.String(100), comment='交易理由')
     signal_type = db.Column(db.String(20), comment='信号类型')
     notes = db.Column(db.Text, comment='备注')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
 
     account = db.relationship('Account', backref=db.backref('trades', lazy='dynamic'))
     position = db.relationship('Position', backref=db.backref('trades', lazy='dynamic'))
@@ -178,8 +187,10 @@ class Trade(db.Model):
             'id': self.id,
             'user_id': self.user_id,
             'account_id': self.account_id,
+            'account_name': self.account.name if self.account else None,
             'position_id': self.position_id,
             'symbol': self.symbol,
+            'position_name': self.position.name if self.position else None,
             'trade_type': self.trade_type,
             'quantity': self.quantity,
             'price': float(self.price) if self.price else 0,
@@ -211,7 +222,7 @@ class Valuation(db.Model):
     score = db.Column(db.Numeric(5, 2), comment='综合评分')
     suggestion = db.Column(db.String(100), comment='操作建议')
     record_date = db.Column(db.Date, nullable=False, comment='记录日期')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
 
     def to_dict(self):
         """转换为字典"""
@@ -245,7 +256,7 @@ class CashPool(db.Model):
     balance = db.Column(db.Numeric(12, 2), nullable=False, comment='余额')
     event = db.Column(db.String(100), nullable=False, comment='事件描述')
     event_date = db.Column(db.Date, nullable=False, comment='事件日期')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
 
     def to_dict(self):
         """转换为字典"""
@@ -269,7 +280,7 @@ class Config(db.Model):
     key = db.Column(db.String(50), nullable=False, comment='配置键')
     value = db.Column(db.Text, nullable=False, comment='配置值')
     description = db.Column(db.String(200), comment='配置说明')
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment='更新时间')
+    updated_at = db.Column(db.DateTime, default=get_local_now, onupdate=get_local_now, comment='更新时间')
 
     def to_dict(self):
         """转换为字典"""
@@ -296,7 +307,7 @@ class PortfolioSnapshot(db.Model):
     profit_rate = db.Column(db.Numeric(8, 4), comment='收益率')
     position_count = db.Column(db.Integer, default=0, comment='持仓数')
     notes = db.Column(db.Text, comment='备注')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
 
     account = db.relationship('Account', backref=db.backref('snapshots', lazy='dynamic'))
 
@@ -350,7 +361,7 @@ class PriceHistory(db.Model):
     # 数据来源
     data_source = db.Column(db.String(20), comment='数据来源: akshare/baostock/eastmoney/tushare')
 
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
 
     # 唯一约束：同一用户、同一标的、同一日期只能有一条记录
     __table_args__ = (
@@ -399,7 +410,7 @@ class AIAnalysisHistory(db.Model):
     overall_score = db.Column(db.Integer, nullable=True, comment='综合评分')
     model_provider = db.Column(db.String(50), comment='模型提供商')
     model_name = db.Column(db.String(100), comment='模型名称')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
 
     user = db.relationship('User', backref=db.backref('ai_analyses', lazy='dynamic'))
     position = db.relationship('Position', backref=db.backref('ai_analyses', lazy='dynamic'))
@@ -432,7 +443,7 @@ class IncomeRecord(db.Model):
     income_amount = db.Column(db.Numeric(12, 2), nullable=False, comment='收益金额')
     income_type = db.Column(db.String(20), comment='收益类型: interest/dividend/maturity/other')
     note = db.Column(db.Text, comment='备注')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
 
     position = db.relationship('Position', backref=db.backref('income_records', lazy='dynamic'))
 
@@ -468,8 +479,8 @@ class AIAnalysisTask(db.Model):
     model_provider = db.Column(db.String(50), comment='模型提供商')
     model_name = db.Column(db.String(100), comment='模型名称')
     error_message = db.Column(db.Text, comment='错误信息')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment='更新时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
+    updated_at = db.Column(db.DateTime, default=get_local_now, onupdate=get_local_now, comment='更新时间')
     completed_at = db.Column(db.DateTime, comment='完成时间')
 
     user = db.relationship('User', backref=db.backref('ai_tasks', lazy='dynamic'))
@@ -521,8 +532,8 @@ class AIAnalysisDimension(db.Model):
     score = db.Column(db.Integer, comment='评分')
     analysis = db.Column(db.Text, comment='分析内容')
     error_message = db.Column(db.Text, comment='错误信息')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment='更新时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
+    updated_at = db.Column(db.DateTime, default=get_local_now, onupdate=get_local_now, comment='更新时间')
 
     __table_args__ = (
         db.UniqueConstraint('task_id', 'dimension', name='uix_task_dimension'),
@@ -560,7 +571,7 @@ class BacktestHistory(db.Model):
     best_strategy = db.Column(db.String(50), comment='最佳策略名称')
     best_return = db.Column(db.Numeric(8, 4), comment='最佳收益率')
     notes = db.Column(db.Text, comment='备注')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
+    created_at = db.Column(db.DateTime, default=get_local_now, comment='创建时间')
 
     user = db.relationship('User', backref=db.backref('backtest_histories', lazy='dynamic'))
 

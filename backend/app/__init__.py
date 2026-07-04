@@ -4,6 +4,21 @@
 Flask 应用工厂
 """
 
+# ============================================
+# 加载 .env 环境变量文件（必须最先执行）
+# ============================================
+import os
+try:
+    from dotenv import load_dotenv
+    # 查找项目根目录的 .env
+    _current_dir = os.path.dirname(os.path.abspath(__file__))
+    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(_current_dir)))
+    _env_path = os.path.join(_project_root, '.env')
+    if os.path.exists(_env_path):
+        load_dotenv(_env_path)
+except ImportError:
+    pass
+
 from flask import Flask
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -11,7 +26,6 @@ from flask_migrate import Migrate
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import yaml
-import os
 import logging
 
 db = SQLAlchemy()
@@ -37,9 +51,13 @@ def load_config():
 
 def create_app(config=None):
     """创建 Flask 应用"""
+    # Vue 前端路径 - 直接使用 frontend/dist
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    vue_dist = os.path.join(project_root, 'frontend', 'dist')
+
     app = Flask(__name__,
-                template_folder='../../frontend',
-                static_folder='../../frontend',
+                template_folder=vue_dist,
+                static_folder=vue_dist,
                 static_url_path='')
 
     # 加载配置
@@ -55,11 +73,15 @@ def create_app(config=None):
     app.config['JWT_SECRET_KEY'] = jwt_config.get('secret_key', os.environ.get('JWT_SECRET', 'jwt-dev-secret-key'))
     app.config['JWT_EXPIRES_HOURS'] = jwt_config.get('expires_hours', 24)
 
-    # 数据库配置
+    # 数据库配置 - SQLite（本地文件存储，方便迁移）
     db_config = config.get('database', {})
-    db_uri = f"mysql+pymysql://{db_config.get('user', 'root')}:{db_config.get('password', '')}@" \
-             f"{db_config.get('host', 'localhost')}:{db_config.get('port', 3306)}/" \
-             f"{db_config.get('database', 'myapp')}?charset={db_config.get('charset', 'utf8mb4')}"
+    db_path = db_config.get('path', 'data/app.db')
+    # 如果是相对路径，转为项目根目录下的绝对路径
+    if not os.path.isabs(db_path):
+        db_path = os.path.join(project_root, db_path)
+    # 确保 data 目录存在
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    db_uri = f"sqlite:///{db_path}"
     app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     # 生产模式下不显示 SQL 日志
@@ -121,11 +143,30 @@ def create_app(config=None):
     app.register_blueprint(health_bp, url_prefix='/api/v1')  # 健康检查接口
     app.register_blueprint(scheduler_bp, url_prefix='/api/v1')  # 定时任务管理
 
-    # 主页路由
+    # 主页路由 - Vue SPA
     @app.route('/')
     def index():
-        from flask import send_from_directory
-        return send_from_directory('../../frontend', 'index.html')
+        from flask import send_file
+        index_path = os.path.join(app.template_folder, 'index.html')
+        if os.path.exists(index_path):
+            return send_file(index_path)
+        return "前端未构建，请运行: cd frontend-vue && npm install && npm run build"
+
+    # 所有 404 错误返回 index.html（Vue SPA fallback）
+    @app.errorhandler(404)
+    def spa_fallback(e):
+        from flask import request, send_file
+        # API 路由 404 返回 JSON 错误
+        if request.path.startswith('/api/'):
+            return {'success': False, 'message': '接口不存在'}, 404
+        # 静态资源 404 返回空
+        if request.path.startswith('/assets/'):
+            return '', 404
+        # 其他路由返回 index.html（让 Vue Router 处理）
+        index_path = os.path.join(app.template_folder, 'index.html')
+        if os.path.exists(index_path):
+            return send_file(index_path)
+        return "前端未构建", 404
 
     # 初始化定时任务调度器
     try:
@@ -134,6 +175,29 @@ def create_app(config=None):
         logger.info("定时任务调度器启动成功")
     except Exception as e:
         logger.warning(f"定时任务调度器启动失败: {str(e)}")
+
+    # 清理僵尸任务（服务重启时将running状态的任务标记为interrupted）
+    try:
+        with app.app_context():
+            from .models import AIAnalysisTask, AIAnalysisDimension
+            # 查找所有running状态的任务
+            running_tasks = AIAnalysisTask.query.filter_by(status='running').all()
+            if running_tasks:
+                logger.info(f"发现 {len(running_tasks)} 个僵尸任务，正在清理...")
+                for task in running_tasks:
+                    task.status = 'interrupted'
+                    task.error_message = '服务重启，任务被中断'
+                    # 将pending状态的维度标记为failed
+                    pending_dims = AIAnalysisDimension.query.filter_by(
+                        task_id=task.id, status='pending'
+                    ).all()
+                    for dim in pending_dims:
+                        dim.status = 'failed'
+                        dim.error_message = '服务中断'
+                db.session.commit()
+                logger.info(f"僵尸任务清理完成")
+    except Exception as e:
+        logger.warning(f"僵尸任务清理失败: {str(e)}")
 
     # 初始化日志中间件（请求日志）
     from .utils.logging import init_request_logging

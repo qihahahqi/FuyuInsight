@@ -11,6 +11,7 @@ import logging
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from flask import Flask
+from ..models.models import get_local_now
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class AIAnalysisTaskService:
     def start_task(self, app: Flask, user_id: int, analysis_type: str,
                    dimensions: List[str], position_id: Optional[int] = None,
                    symbol: Optional[str] = None, model_provider: str = 'openai',
-                   model_name: str = 'gpt-4') -> Dict[str, Any]:
+                   model_name: str = 'gpt-4', api_format: str = '') -> Dict[str, Any]:
         """
         启动异步分析任务
 
@@ -38,6 +39,7 @@ class AIAnalysisTaskService:
             symbol: 标的代码（单标的分析时）
             model_provider: 模型提供商
             model_name: 模型名称
+            api_format: API 格式 (openai/anthropic)
 
         Returns:
             启动状态和任务信息
@@ -80,7 +82,7 @@ class AIAnalysisTaskService:
 
         thread = threading.Thread(
             target=self._run_analysis_loop,
-            args=(app, task_id, user_id, analysis_type, dimensions, position_id, symbol, model_provider, model_name, stop_flag),
+            args=(app, task_id, user_id, analysis_type, dimensions, position_id, symbol, model_provider, model_name, api_format, stop_flag),
             daemon=True
         )
         thread.start()
@@ -101,7 +103,7 @@ class AIAnalysisTaskService:
                            analysis_type: str, dimensions: List[str],
                            position_id: Optional[int], symbol: Optional[str],
                            model_provider: str, model_name: str,
-                           stop_flag: threading.Event):
+                           api_format: str, stop_flag: threading.Event):
         """
         后台分析循环 - 逐维度执行并增量保存
         """
@@ -118,14 +120,14 @@ class AIAnalysisTaskService:
                     return
 
                 task.status = 'running'
-                task.updated_at = datetime.utcnow()
+                task.updated_at = get_local_now()
                 db.session.commit()
 
                 logger.info(f"[AI分析] 任务 {task_id} 开始执行")
 
                 # 获取 LLM 配置
                 llm_config = config_manager.llm_config.copy()
-                config_keys = ['api_key', 'api_base', 'temperature', 'max_tokens']
+                config_keys = ['api_key', 'api_base', 'api_format', 'temperature', 'max_tokens', 'reasoning_effort', 'enable_thinking']
                 for key in config_keys:
                     db_config = Config.query.filter_by(key=f'llm.{key}', user_id=user_id).first()
                     if db_config:
@@ -139,6 +141,13 @@ class AIAnalysisTaskService:
                                 llm_config[key] = int(db_config.value)
                             except:
                                 pass
+                        elif key == 'enable_thinking':
+                            # 布尔值转换：先尝试 json.loads，再回退到字符串比较
+                            try:
+                                import json as _json
+                                llm_config[key] = _json.loads(db_config.value)
+                            except:
+                                llm_config[key] = db_config.value.lower() == 'true' if isinstance(db_config.value, str) else bool(db_config.value)
                         else:
                             llm_config[key] = db_config.value
 
@@ -149,10 +158,15 @@ class AIAnalysisTaskService:
                 if not api_key:
                     task.status = 'failed'
                     task.error_message = '未配置 API Key'
-                    task.updated_at = datetime.utcnow()
+                    task.updated_at = get_local_now()
                     db.session.commit()
                     logger.error(f"[AI分析] 任务 {task_id} 失败: 未配置 API Key")
                     return
+
+                # 安全解析 enable_thinking
+                _enable_thinking = llm_config.get('enable_thinking', False)
+                if isinstance(_enable_thinking, str):
+                    _enable_thinking = _enable_thinking.lower() == 'true'
 
                 # 创建 LLM 服务
                 llm_service = LLMService(
@@ -160,8 +174,11 @@ class AIAnalysisTaskService:
                     api_key=api_key,
                     api_base=llm_config.get('api_base', ''),
                     model=model_name or llm_config.get('model', 'gpt-4'),
+                    api_format=api_format or llm_config.get('api_format', ''),
                     temperature=llm_config.get('temperature', 0.7),
-                    max_tokens=llm_config.get('max_tokens', 2000)
+                    max_tokens=llm_config.get('max_tokens', 2000),
+                    reasoning_effort=llm_config.get('reasoning_effort', ''),
+                    enable_thinking=_enable_thinking
                 )
 
                 # 收集数据
@@ -192,14 +209,14 @@ class AIAnalysisTaskService:
                     if stop_flag.is_set():
                         task.status = 'cancelled'
                         task.error_message = '用户取消'
-                        task.updated_at = datetime.utcnow()
+                        task.updated_at = get_local_now()
                         db.session.commit()
                         logger.info(f"[AI分析] 任务 {task_id} 已取消")
                         return
 
                     # 更新当前维度
                     task.current_dimension = dim
-                    task.updated_at = datetime.utcnow()
+                    task.updated_at = get_local_now()
                     db.session.commit()
 
                     logger.info(f"[AI分析] 任务 {task_id} 开始分析维度: {dim}")
@@ -208,7 +225,7 @@ class AIAnalysisTaskService:
                     dim_record = AIAnalysisDimension.query.filter_by(task_id=task_id, dimension=dim).first()
                     if dim_record:
                         dim_record.status = 'running'
-                        dim_record.updated_at = datetime.utcnow()
+                        dim_record.updated_at = get_local_now()
                         db.session.commit()
 
                     try:
@@ -247,7 +264,7 @@ class AIAnalysisTaskService:
                             dim_record.status = 'completed'
                             dim_record.analysis = analysis_text
                             dim_record.score = score
-                            dim_record.updated_at = datetime.utcnow()
+                            dim_record.updated_at = get_local_now()
                             db.session.commit()
 
                         completed_count += 1
@@ -264,7 +281,7 @@ class AIAnalysisTaskService:
                         if dim_record:
                             dim_record.status = 'failed'
                             dim_record.error_message = str(e)
-                            dim_record.updated_at = datetime.utcnow()
+                            dim_record.updated_at = get_local_now()
                             db.session.commit()
 
                         completed_count += 1
@@ -278,8 +295,8 @@ class AIAnalysisTaskService:
                 task.progress = len(dimensions)
                 task.overall_score = overall_score
                 task.current_dimension = None
-                task.completed_at = datetime.utcnow()
-                task.updated_at = datetime.utcnow()
+                task.completed_at = get_local_now()
+                task.updated_at = get_local_now()
                 db.session.commit()
 
                 logger.info(f"[AI分析] 任务 {task_id} 完成: overall_score={overall_score}")
@@ -291,7 +308,7 @@ class AIAnalysisTaskService:
                     if task:
                         task.status = 'failed'
                         task.error_message = str(e)
-                        task.updated_at = datetime.utcnow()
+                        task.updated_at = get_local_now()
                         db.session.commit()
                 except:
                     pass
@@ -406,7 +423,7 @@ class AIAnalysisTaskService:
         if task.status == 'pending':
             task.status = 'cancelled'
             task.error_message = '用户取消'
-            task.updated_at = datetime.utcnow()
+            task.updated_at = get_local_now()
 
         logger.info(f"[AI分析] 任务 {task_id} 用户请求取消")
 
